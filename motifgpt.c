@@ -19,7 +19,7 @@
 
 #include <X11/keysym.h>
 #include <X11/Xlib.h>
-#include <X11/Intrinsic.h>
+#include <X11/Intrinsic.h> // For XtTranslateKeycode
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,7 +65,7 @@ Widget settings_general_tab_content, settings_gemini_tab_content, settings_opena
 Widget settings_current_tab_content = NULL;
 Widget provider_gemini_rb, provider_openai_rb;
 Widget gemini_api_key_text, gemini_model_text, gemini_model_list;
-Widget openai_api_key_text, openai_model_text, openai_base_url_text, openai_model_list; // Added openai_base_url_text
+Widget openai_api_key_text, openai_model_text, openai_base_url_text, openai_model_list;
 Widget history_length_text;
 Widget disable_history_limit_toggle;
 
@@ -74,7 +74,7 @@ char current_gemini_api_key[256] = "";
 char current_gemini_model[128] = DEFAULT_MODEL_GEMINI;
 char current_openai_api_key[256] = "";
 char current_openai_model[128] = DEFAULT_MODEL_OPENAI;
-char current_openai_base_url[256] = ""; // Added for OpenAI base URL
+char current_openai_base_url[256] = "";
 int current_max_history_messages = DEFAULT_MAX_HISTORY_MESSAGES;
 Boolean history_limits_disabled = False;
 
@@ -102,7 +102,6 @@ typedef enum {
 typedef struct { pipe_message_type_t type; char data[512]; } pipe_message_t;
 typedef struct { dp_request_config_t config; } llm_thread_data_t;
 typedef struct { dp_provider_type_t provider; char api_key_for_list[256]; char base_url_for_list[256]; } get_models_thread_data_t;
-
 
 // Function Prototypes
 void send_message_callback(Widget, XtPointer, XtPointer);
@@ -428,7 +427,7 @@ static void input_text_key_press_handler(Widget w, XtPointer client_data, XEvent
                 *continue_to_dispatch = False;
             }
         } else {
-            *continue_to_dispatch = True;
+            *continue_to_dispatch = True; // Allow other keys to be processed by app_text_key_press_handler
         }
     } else {
         *continue_to_dispatch = True;
@@ -440,6 +439,7 @@ static void app_text_key_press_handler(Widget w, XtPointer client_data, XEvent *
     if (event->type == KeyPress) {
         XKeyEvent *key_event = (XKeyEvent *)event;
         KeySym keysym;
+        // Modifiers modifiers; // Not strictly needed if checking event->xkey.state directly
         char buffer[10]; XLookupString(key_event, buffer, sizeof(buffer)-1, &keysym, NULL);
 
         if (key_event->state & ControlMask) {
@@ -495,20 +495,22 @@ void select_all_callback(Widget w, XtPointer client_data, XtPointer call_data) {
 }
 
 static void popup_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch) {
-    if (event->type == ButtonPress && event->xbutton.button == 3) {
-        focused_text_widget = w;
+    if (event->type == ButtonPress && event->xbutton.button == 3) { // Button 3 for right-click
+        focused_text_widget = w; // Set the currently focused widget to the one that received the click
         if (popup_menu) {
             Boolean editable = XmTextGetEditable(focused_text_widget);
             XtSetSensitive(popup_cut_item, editable);
             XtSetSensitive(popup_paste_item, editable);
+            // Copy and Select All are always sensitive for text widgets
             XtSetSensitive(popup_copy_item, True);
             XtSetSensitive(popup_select_all_item, True);
+
             XmMenuPosition(popup_menu, (XButtonPressedEvent*)event);
             XtManageChild(popup_menu);
         }
-        *continue_to_dispatch = False;
+        *continue_to_dispatch = False; // We've handled the button press
     } else {
-        *continue_to_dispatch = True;
+        *continue_to_dispatch = True; // Allow other handlers to process other button presses
     }
 }
 
@@ -747,7 +749,7 @@ void populate_settings_dialog() {
     XmTextFieldSetString(gemini_model_text, current_gemini_model); XmListDeleteAllItems(gemini_model_list);
     XmTextFieldSetString(openai_api_key_text, current_openai_api_key);
     XmTextFieldSetString(openai_model_text, current_openai_model);
-    XmTextFieldSetString(openai_base_url_text, current_openai_base_url); // Populate new field
+    XmTextFieldSetString(openai_base_url_text, current_openai_base_url);
     XmListDeleteAllItems(openai_model_list);
 }
 
@@ -816,14 +818,12 @@ void settings_get_models_callback(Widget w, XtPointer client_data, XtPointer cal
     dp_provider_type_t provider_for_list; char *api_key_str; char *base_url_str = NULL;
     long tab_type = (long)client_data;
 
-    if (tab_type == 0) { // Gemini Tab
-        provider_for_list = DP_PROVIDER_GOOGLE_GEMINI;
-        api_key_str = XmTextFieldGetString(gemini_api_key_text);
+    if (tab_type == 0) {
+        provider_for_list = DP_PROVIDER_GOOGLE_GEMINI; api_key_str = XmTextFieldGetString(gemini_api_key_text);
         XmListDeleteAllItems(gemini_model_list);
-    } else { // OpenAI Tab
-        provider_for_list = DP_PROVIDER_OPENAI_COMPATIBLE;
-        api_key_str = XmTextFieldGetString(openai_api_key_text);
-        base_url_str = XmTextFieldGetString(openai_base_url_text); // Get base URL for OpenAI
+    } else {
+        provider_for_list = DP_PROVIDER_OPENAI_COMPATIBLE; api_key_str = XmTextFieldGetString(openai_api_key_text);
+        base_url_str = XmTextFieldGetString(openai_base_url_text);
         XmListDeleteAllItems(openai_model_list);
     }
     if (!api_key_str || strlen(api_key_str) == 0) {
@@ -839,7 +839,7 @@ void settings_get_models_callback(Widget w, XtPointer client_data, XtPointer cal
         strncpy(thread_data->base_url_for_list, base_url_str, sizeof(thread_data->base_url_for_list)-1);
         thread_data->base_url_for_list[sizeof(thread_data->base_url_for_list)-1] = '\0';
     } else {
-        thread_data->base_url_for_list[0] = '\0'; // Empty string if no base URL
+        thread_data->base_url_for_list[0] = '\0';
     }
     XtFree(api_key_str); if(base_url_str) XtFree(base_url_str);
     pthread_t tid;
@@ -863,7 +863,7 @@ void settings_use_selected_model_callback(Widget w, XtPointer client_data, XtPoi
 
 void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     if (settings_shell == NULL) {
-        settings_shell = XtVaCreatePopupShell("settingsShell", topLevelShellWidgetClass, app_shell, XmNtitle, "MotifGPT Settings", XmNwidth, 550, XmNheight, 550, NULL); // Adjusted size
+        settings_shell = XtVaCreatePopupShell("settingsShell", topLevelShellWidgetClass, app_shell, XmNtitle, "MotifGPT Settings", XmNwidth, 550, XmNheight, 500, NULL);
         Widget dialog_form = XtVaCreateManagedWidget("dialogForm", xmFormWidgetClass, settings_shell, NULL);
         Widget tab_button_rc = XtVaCreateManagedWidget("tabButtonRc", xmRowColumnWidgetClass, dialog_form, XmNorientation, XmHORIZONTAL, XmNradioBehavior, True, XmNindicatorType, XmONE_OF_MANY, XmNentryAlignment, XmALIGNMENT_CENTER, XmNpacking, XmPACK_TIGHT, XmNtopAttachment, XmATTACH_FORM, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, 5, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5, NULL);
         Widget general_tab_btn = XtVaCreateManagedWidget("General", xmToggleButtonWidgetClass, tab_button_rc, XmNindicatorOn, False, NULL);
@@ -914,11 +914,11 @@ void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
         XtVaSetValues(XtParent(openai_model_list), XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_get_models_btn, XmNtopOffset,5, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM,NULL);
         XtManageChild(openai_model_list);
 
-        Widget button_form = XtVaCreateManagedWidget("buttonForm", xmFormWidgetClass, dialog_form, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 5, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, 5, NULL); // Centered by default if no specific alignment
+        Widget button_form = XtVaCreateManagedWidget("buttonForm", xmFormWidgetClass, dialog_form, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 5, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, 5, NULL);
         Widget ok_button = XtVaCreateManagedWidget("OK", xmPushButtonWidgetClass, button_form, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_NONE, XmNtopAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM, NULL);
         Widget cancel_button = XtVaCreateManagedWidget("Cancel", xmPushButtonWidgetClass, button_form, XmNleftAttachment, XmATTACH_WIDGET, XmNleftWidget, ok_button, XmNleftOffset, 5, XmNrightAttachment, XmATTACH_NONE, XmNtopAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM, NULL);
         Widget apply_button = XtVaCreateManagedWidget("Apply", xmPushButtonWidgetClass, button_form, XmNleftAttachment, XmATTACH_WIDGET, XmNleftWidget, cancel_button, XmNleftOffset, 5, XmNrightAttachment, XmATTACH_NONE, XmNtopAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM, NULL);
-        XtVaSetValues(button_form, XmNdefaultButton, ok_button, NULL); // OK as default action for the dialog
+        XtVaSetValues(button_form, XmNdefaultButton, ok_button, NULL);
 
         XtAddCallback(ok_button, XmNactivateCallback, settings_ok_callback, NULL);
         XtAddCallback(apply_button, XmNactivateCallback, settings_apply_callback, NULL);
@@ -1022,7 +1022,7 @@ int main(int argc, char **argv) {
     XtManageChild(input_text); XtManageChild(scrolled_input_win);
     XmScrolledWindowSetAreas(scrolled_input_win, NULL, NULL, input_text);
     XtAddEventHandler(input_text, KeyPressMask, False, input_text_key_press_handler, NULL);
-    XtAddEventHandler(input_text, KeyPressMask, True, app_text_key_press_handler, NULL);
+    XtAddEventHandler(input_text, KeyPressMask, True, app_text_key_press_handler, NULL); // Pass True to allow other handlers
     XtAddCallback(input_text, XmNfocusCallback, focus_callback, NULL);
     XtAddEventHandler(input_text, ButtonPressMask, False, popup_handler, NULL);
 
