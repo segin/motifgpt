@@ -23,7 +23,7 @@
 
 #include <X11/keysym.h>
 #include <X11/Xlib.h>
-#include <X11/Intrinsic.h>
+#include <X11/Intrinsic.h> // For XtTranslateKeycode
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,12 +34,12 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <libgen.h>
-#include <wordexp.h>
-#include <limits.h>
+#include <libgen.h> // For basename
+#include <wordexp.h> // For tilde expansion
+#include <limits.h> // For INT_MAX
 
-#include "disasterparty.h"
-#include <curl/curl.h>
+#include "disasterparty.h" // Assuming disasterparty.h is in include path
+#include <curl/curl.h>     // For curl_global_init/cleanup
 
 // --- Configuration ---
 #define DEFAULT_PROVIDER DP_PROVIDER_GOOGLE_GEMINI
@@ -356,6 +356,16 @@ void send_message_callback(Widget w, XtPointer client_data, XtPointer call_data)
         XtFree(input_string_raw); input_string_raw = NULL;
         if (!attached_image_base64_data) return;
     }
+
+    // Check for LLM context BEFORE modifying UI or history
+    if (!dp_ctx) {
+        show_error_dialog("LLM context not initialized. Please check API Key and Model ID in Settings.");
+        // Do NOT clear input_text or append to conversation_text if context is bad
+        XtFree(input_string_raw); // Still need to free this
+        return;
+    }
+
+
     char display_msg_text_part[1024] = "";
     if (input_string_raw) {
          snprintf(display_msg_text_part, sizeof(display_msg_text_part), "%s: %s", USER_NICKNAME, input_string_raw);
@@ -373,15 +383,13 @@ void send_message_callback(Widget w, XtPointer client_data, XtPointer call_data)
     add_message_to_history(DP_ROLE_USER, input_string_raw ? input_string_raw : "",
                            attached_image_base64_data ? attached_image_mime_type : NULL,
                            attached_image_base64_data);
-    XmTextSetString(input_text, "");
+    XmTextSetString(input_text, ""); // Clear input text only after successful pre-checks
     if (input_string_raw) XtFree(input_string_raw);
     if (attached_image_base64_data) {
         free(attached_image_base64_data); attached_image_base64_data = NULL;
         attached_image_path[0] = '\0'; attached_image_mime_type[0] = '\0';
     }
-    if (!dp_ctx) {
-        show_error_dialog("LLM context not initialized. Check Settings."); return;
-    }
+
     llm_thread_data_t *thread_data = malloc(sizeof(llm_thread_data_t));
     if (!thread_data) { perror("malloc llm_thread_data"); return; }
     thread_data->config.model = (current_api_provider == DP_PROVIDER_GOOGLE_GEMINI) ? current_gemini_model : current_openai_model;
@@ -446,7 +454,7 @@ static void input_text_key_press_handler(Widget w, XtPointer client_data, XEvent
                 *continue_to_dispatch = False;
             }
         } else {
-            *continue_to_dispatch = True; // Allow app_text_key_press_handler to see other Ctrl keys
+            *continue_to_dispatch = True;
         }
     } else {
         *continue_to_dispatch = True;
@@ -461,12 +469,10 @@ static void app_text_key_press_handler(Widget w, XtPointer client_data, XEvent *
         char buffer[10]; XLookupString(key_event, buffer, sizeof(buffer)-1, &keysym, NULL);
 
         if (key_event->state & ControlMask) {
-            // Skip if it's Ctrl+Enter, as that's handled by input_text_key_press_handler
-            if (keysym == XK_Return || keysym == XK_KP_Enter) {
+            if (keysym == XK_Return || keysym == XK_KP_Enter) { // Let input_text_key_press_handler handle Ctrl+Enter for input_text
                  *continue_to_dispatch = True;
                  return;
             }
-
             switch (keysym) {
                 case XK_x: case XK_X:
                     if (focused_text_widget && XmIsText(focused_text_widget) && XmTextGetEditable(focused_text_widget))
@@ -858,13 +864,13 @@ void retrieve_settings_from_dialog() {
     if (strcmp(tmp, DEFAULT_OPENAI_BASE_URL) == 0) {
         Pixel current_fg;
         XtVaGetValues(openai_base_url_text, XmNforeground, &current_fg, NULL);
-        if (current_fg == grey_fg_color) {
-            current_openai_base_url[0] = '\0';
-        } else {
+        if (current_fg == grey_fg_color) { // It was the placeholder
+            current_openai_base_url[0] = '\0'; // Store as empty to use disasterparty's default
+        } else { // User explicitly typed the default URL
              strncpy(current_openai_base_url, tmp, sizeof(current_openai_base_url)-1);
              current_openai_base_url[sizeof(current_openai_base_url)-1]='\0';
         }
-    } else {
+    } else { // User typed something else
         strncpy(current_openai_base_url, tmp, sizeof(current_openai_base_url)-1);
         current_openai_base_url[sizeof(current_openai_base_url)-1]='\0';
     }
@@ -937,11 +943,11 @@ void settings_get_models_callback(Widget w, XtPointer client_data, XtPointer cal
 
     if (base_url_str && strlen(base_url_str) > 0 && strcmp(base_url_str, DEFAULT_OPENAI_BASE_URL) != 0) {
         Pixel current_fg; XtVaGetValues(openai_base_url_text, XmNforeground, &current_fg, NULL);
-        if (current_fg != grey_fg_color) { // Only use it if it's not the placeholder
+        if (current_fg != grey_fg_color) {
             strncpy(thread_data->base_url_for_list, base_url_str, sizeof(thread_data->base_url_for_list)-1);
             thread_data->base_url_for_list[sizeof(thread_data->base_url_for_list)-1] = '\0';
         } else {
-             thread_data->base_url_for_list[0] = '\0'; // Use default
+             thread_data->base_url_for_list[0] = '\0';
         }
     } else {
         thread_data->base_url_for_list[0] = '\0';
@@ -1027,12 +1033,11 @@ void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
                                                    XmNorientation, XmHORIZONTAL, XmNpacking, XmPACK_TIGHT,
                                                    XmNentryAlignment, XmALIGNMENT_CENTER, XmNspacing, 10,
                                                    XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 5,
-                                                   XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5,
+                                                   XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5, // Align to right
                                                    NULL);
         Widget ok_button = XtVaCreateManagedWidget("OK", xmPushButtonWidgetClass, button_rc_bottom, NULL);
         Widget cancel_button = XtVaCreateManagedWidget("Cancel", xmPushButtonWidgetClass, button_rc_bottom, NULL);
         Widget apply_button = XtVaCreateManagedWidget("Apply", xmPushButtonWidgetClass, button_rc_bottom, NULL);
-
         XtAddCallback(ok_button, XmNactivateCallback, settings_ok_callback, NULL);
         XtAddCallback(cancel_button, XmNactivateCallback, settings_cancel_callback, NULL);
         XtAddCallback(apply_button, XmNactivateCallback, settings_apply_callback, NULL);
@@ -1084,8 +1089,14 @@ int main(int argc, char **argv) {
     XColor xcolor_grey_val, xcolor_exact_grey;
     if (XAllocNamedColor(dpy, cmap, "grey70", &xcolor_grey_val, &xcolor_exact_grey)) {
         grey_fg_color = xcolor_grey_val.pixel;
-    } else {
-        grey_fg_color = WhitePixel(dpy, DefaultScreen(dpy)) / 2 + BlackPixel(dpy, DefaultScreen(dpy)) / 2 ;
+    } else { // Fallback grey
+        XColor screen_def_grey;
+        screen_def_grey.red = screen_def_grey.green = screen_def_grey.blue = 0.7 * 65535; // Approx grey70
+        if (XAllocColor(dpy, cmap, &screen_def_grey)) {
+            grey_fg_color = screen_def_grey.pixel;
+        } else { // Absolute fallback
+             grey_fg_color = WhitePixel(dpy, DefaultScreen(dpy)) / 2 + BlackPixel(dpy, DefaultScreen(dpy)) / 2 ;
+        }
     }
     Widget temp_tf = XmCreateTextField(app_shell, "tempTf", NULL, 0);
     XtVaGetValues(temp_tf, XmNforeground, &normal_fg_color, NULL);
