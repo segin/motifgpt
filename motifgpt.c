@@ -11,8 +11,8 @@
 #include <Xm/Separator.h>
 #include <Xm/MessageB.h>
 #include <Xm/CutPaste.h>
-#include <X11/keysym.h> // For XK_Return, XK_KP_Enter, XK_F, etc.
-#include <X11/Xlib.h>   // For KeySym, XLookupString, XKeyEvent
+#include <X11/keysym.h>
+#include <X11/Xlib.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,7 +29,10 @@
 #define CHATBOT_MODEL "gemini-2.0-flash"
 #define USER_NICKNAME "User"
 #define ASSISTANT_NICKNAME "Assistant"
-#define MAX_HISTORY_MESSAGES 50 // Max messages to keep in history (user + assistant turns)
+// ZOI Principle: Ideally 0, 1, or Infinity.
+// Using a large practical limit here.
+// If truly unbounded history is desired, memory management becomes more critical.
+#define MAX_HISTORY_MESSAGES 100 // Increased limit, with FIFO removal
 // --- End Configuration ---
 
 // Globals
@@ -51,7 +54,7 @@ bool prefix_already_added_for_current_reply = false;
 dp_message_t *chat_history = NULL;
 int chat_history_count = 0;
 int chat_history_capacity = 0;
-char *current_assistant_response_buffer = NULL; // To accumulate full assistant response for history
+char *current_assistant_response_buffer = NULL;
 size_t current_assistant_response_len = 0;
 size_t current_assistant_response_capacity = 0;
 
@@ -67,6 +70,8 @@ static void focus_callback(Widget w, XtPointer client_data, XtPointer call_data)
 void clear_chat_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void add_message_to_history(dp_message_role_t role, const char* text_content);
 void free_chat_history();
+void remove_oldest_history_messages(int count_to_remove);
+
 
 // Edit menu callbacks
 void cut_callback(Widget w, XtPointer client_data, XtPointer call_data);
@@ -83,7 +88,6 @@ void append_to_conversation(const char* text) {
     XmTextShowPosition(conversation_text, current_pos);
 }
 
-// Helper to add to current_assistant_response_buffer
 void append_to_assistant_buffer(const char* text) {
     if (!text) return;
     size_t text_len = strlen(text);
@@ -120,8 +124,9 @@ int stream_handler(const char* token, void* user_data, bool is_final, const char
         return 1;
     }
 
-    if (!assistant_is_replying) {
+    if (!assistant_is_replying) { // This is the first token of a new reply stream
         assistant_is_replying = true;
+        prefix_already_added_for_current_reply = false; // Ensure prefix will be added by handle_pipe_input
         if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
         current_assistant_response_len = 0;
     }
@@ -143,8 +148,8 @@ int stream_handler(const char* token, void* user_data, bool is_final, const char
         if (write(pipe_fds[1], end_marker, strlen(end_marker)) == -1) {
             perror("stream_handler: write end_marker to pipe");
         }
-        assistant_is_replying = false;
-        prefix_already_added_for_current_reply = false;
+        // assistant_is_replying and prefix_already_added_for_current_reply
+        // will be fully reset in handle_pipe_input after processing END_OF_STREAM
     }
     return 0;
 }
@@ -158,6 +163,10 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
         if (strstr(buffer, "[END_OF_STREAM]")) {
             char *actual_content = strtok(buffer, "\n");
              if (actual_content && strcmp(actual_content, "[END_OF_STREAM]") != 0) {
+                 if (assistant_is_replying && !prefix_already_added_for_current_reply) {
+                     append_to_conversation(current_assistant_prefix);
+                     prefix_already_added_for_current_reply = true;
+                 }
                  append_to_conversation(actual_content);
              }
             append_to_conversation("\n");
@@ -166,10 +175,14 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
             }
             if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
             current_assistant_response_len = 0;
+            assistant_is_replying = false; // Fully reset state after stream end
+            prefix_already_added_for_current_reply = false;
 
         } else if (strncmp(buffer, "Stream Error:", 13) == 0) {
             show_error_dialog(buffer);
             append_to_conversation(buffer);
+            assistant_is_replying = false; // Reset on error
+            prefix_already_added_for_current_reply = false;
         } else {
             if (assistant_is_replying && !prefix_already_added_for_current_reply) {
                  append_to_conversation(current_assistant_prefix);
@@ -188,15 +201,53 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
     }
 }
 
-void add_message_to_history(dp_message_role_t role, const char* text_content) {
-    if (chat_history_count >= MAX_HISTORY_MESSAGES) {
-        fprintf(stderr, "Chat history full. Not adding new message.\n");
+void remove_oldest_history_messages(int count_to_remove) {
+    if (count_to_remove <= 0 || count_to_remove > chat_history_count) {
         return;
     }
 
+    // Free the disasterparty parts of the messages being removed
+    for (int i = 0; i < count_to_remove; ++i) {
+        if (chat_history[i].parts) {
+            for (size_t j = 0; j < chat_history[i].num_parts; ++j) {
+                free(chat_history[i].parts[j].text); // Assuming only text parts for now
+                // Add freeing for other part types if used in history
+            }
+            free(chat_history[i].parts);
+        }
+    }
+
+    // Shift the remaining messages
+    int remaining_count = chat_history_count - count_to_remove;
+    if (remaining_count > 0) {
+        memmove(chat_history, &chat_history[count_to_remove], remaining_count * sizeof(dp_message_t));
+    }
+    chat_history_count = remaining_count;
+}
+
+
+void add_message_to_history(dp_message_role_t role, const char* text_content) {
+    // If history is full, remove the oldest message(s) to make space.
+    // Typically, a user message is followed by an assistant message, so remove a pair if possible.
+    if (chat_history_count >= MAX_HISTORY_MESSAGES) {
+        int messages_to_remove = 1; // Default to removing one
+        // If adding a user message and history is full, we might want to remove an old user/assistant pair.
+        // If adding an assistant message and history is full, also remove an old pair.
+        // For simplicity, let's aim to remove 2 if count is at max, to make space for a new pair.
+        if (chat_history_count >= MAX_HISTORY_MESSAGES) {
+            messages_to_remove = 2; // Try to remove a pair
+            if (chat_history_count < 2) messages_to_remove = 1; // Can't remove 2 if less than 2 exist
+        }
+        printf("Chat history full (count %d, max %d). Removing %d oldest message(s).\n",
+               chat_history_count, MAX_HISTORY_MESSAGES, messages_to_remove);
+        remove_oldest_history_messages(messages_to_remove);
+    }
+
+
     if (chat_history_count >= chat_history_capacity) {
         chat_history_capacity = (chat_history_capacity == 0) ? 10 : chat_history_capacity * 2;
-        if (chat_history_capacity > MAX_HISTORY_MESSAGES) chat_history_capacity = MAX_HISTORY_MESSAGES;
+         if (chat_history_capacity > MAX_HISTORY_MESSAGES) chat_history_capacity = MAX_HISTORY_MESSAGES;
+
 
         dp_message_t *new_history = realloc(chat_history, chat_history_capacity * sizeof(dp_message_t));
         if (!new_history) {
@@ -264,8 +315,8 @@ void send_message_callback(Widget w, XtPointer client_data, XtPointer call_data)
 
 
     snprintf(current_assistant_prefix, sizeof(current_assistant_prefix), "%s: ", ASSISTANT_NICKNAME);
-    assistant_is_replying = false;
-    prefix_already_added_for_current_reply = false;
+    // assistant_is_replying and prefix_already_added_for_current_reply
+    // will be reset at the beginning of stream_handler for the new reply.
 
     dp_response_t response_status = {0};
     int ret = dp_perform_streaming_completion(dp_ctx, &request_config, stream_handler, NULL, &response_status);
@@ -318,29 +369,25 @@ static void handle_input_key_press(Widget w, XtPointer client_data, XEvent *even
     if (event->type == KeyPress) {
         XKeyEvent *key_event = (XKeyEvent *)event;
         KeySym keysym;
-        char buffer[1]; // XLookupString needs a buffer, though we only use keysym here
-        // Use XLookupString to get the KeySym, respecting modifiers for Shift, etc.
+        char buffer[1];
         XLookupString(key_event, buffer, 1, &keysym, NULL);
 
 
-        if (keysym == XK_Return || keysym == XK_KP_Enter) { // XK_KP_Enter for numpad Enter
-            if (key_event->state & ShiftMask) { // Check if Shift key is pressed
-                // Insert newline character into the text widget
+        if (keysym == XK_Return || keysym == XK_KP_Enter) {
+            if (key_event->state & ShiftMask) {
                 XmTextInsert(input_text, XmTextGetCursorPosition(input_text), "\n");
-                *continue_to_dispatch = False; // Event handled, don't process further
-            } else { // Enter only (no Shift)
-                // Trigger the send message callback
+                *continue_to_dispatch = False;
+            } else {
                 send_message_callback(send_button, NULL, NULL);
-                *continue_to_dispatch = False; // Event handled
+                *continue_to_dispatch = False;
             }
         }
     }
 }
 
 static void focus_callback(Widget w, XtPointer client_data, XtPointer call_data) {
-    // The call_data for XmNfocusCallback is XmAnyCallbackStruct.
     XmAnyCallbackStruct *focus_data = (XmAnyCallbackStruct *)call_data;
-    if (focus_data->reason == XmCR_FOCUS) { // Check the reason for the callback
+    if (focus_data->reason == XmCR_FOCUS) {
         focused_text_widget = w;
     }
 }
