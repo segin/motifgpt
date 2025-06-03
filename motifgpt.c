@@ -1,3 +1,7 @@
+/*
+ * MotifGPT: A Motif-based LLM Chat Client
+ * Utilizes libdisasterparty for LLM communication.
+ */
 #include <Xm/Xm.h>
 #include <Xm/MainW.h>
 #include <Xm/RowColumn.h>
@@ -19,7 +23,7 @@
 
 #include <X11/keysym.h>
 #include <X11/Xlib.h>
-#include <X11/Intrinsic.h> // For XtTranslateKeycode
+#include <X11/Intrinsic.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,6 +45,7 @@
 #define DEFAULT_PROVIDER DP_PROVIDER_GOOGLE_GEMINI
 #define DEFAULT_MODEL_GEMINI "gemini-2.0-flash"
 #define DEFAULT_MODEL_OPENAI "gpt-4.1-nano"
+#define DEFAULT_OPENAI_BASE_URL "https://api.openai.com/v1"
 #define USER_NICKNAME "User"
 #define ASSISTANT_NICKNAME "Assistant"
 #define DEFAULT_MAX_HISTORY_MESSAGES 100
@@ -68,6 +73,7 @@ Widget gemini_api_key_text, gemini_model_text, gemini_model_list;
 Widget openai_api_key_text, openai_model_text, openai_base_url_text, openai_model_list;
 Widget history_length_text;
 Widget disable_history_limit_toggle;
+Widget enter_sends_message_toggle;
 
 dp_provider_type_t current_api_provider = DEFAULT_PROVIDER;
 char current_gemini_api_key[256] = "";
@@ -77,6 +83,7 @@ char current_openai_model[128] = DEFAULT_MODEL_OPENAI;
 char current_openai_base_url[256] = "";
 int current_max_history_messages = DEFAULT_MAX_HISTORY_MESSAGES;
 Boolean history_limits_disabled = False;
+Boolean enter_key_sends_message = True;
 
 char attached_image_path[PATH_MAX] = "";
 char attached_image_mime_type[64] = "";
@@ -94,6 +101,8 @@ int chat_history_capacity = 0;
 char *current_assistant_response_buffer = NULL;
 size_t current_assistant_response_len = 0;
 size_t current_assistant_response_capacity = 0;
+
+Pixel normal_fg_color, grey_fg_color;
 
 typedef enum {
     PIPE_MSG_TOKEN, PIPE_MSG_STREAM_END, PIPE_MSG_ERROR,
@@ -137,6 +146,8 @@ void settings_cancel_callback(Widget, XtPointer, XtPointer); void settings_get_m
 void *perform_get_models_thread(void*); void settings_use_selected_model_callback(Widget, XtPointer, XtPointer);
 void populate_settings_dialog(); void retrieve_settings_from_dialog();
 void settings_disable_history_limit_toggle_cb(Widget, XtPointer, XtPointer);
+static void openai_base_url_focus_in_cb(Widget, XtPointer, XtPointer);
+static void openai_base_url_focus_out_cb(Widget, XtPointer, XtPointer);
 
 
 void append_to_conversation(const char* text) {
@@ -413,21 +424,29 @@ void show_error_dialog(const char* message) {
     XtManageChild(dialog);
 }
 
-// Specific handler for Enter/Shift-Enter in input_text
+// Specific handler for Enter/Shift-Enter/Ctrl-Enter in input_text
 static void input_text_key_press_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch) {
     if (event->type == KeyPress) {
         XKeyEvent *key_event = (XKeyEvent *)event; KeySym keysym; char buffer[1];
         XLookupString(key_event, buffer, 1, &keysym, NULL);
+
         if (keysym == XK_Return || keysym == XK_KP_Enter) {
-            if (key_event->state & ShiftMask) {
+            if (key_event->state & ShiftMask) { // Shift+Enter always inserts newline
                 XmTextInsert(input_text, XmTextGetCursorPosition(input_text), "\n");
                 *continue_to_dispatch = False;
-            } else {
-                send_message_callback(send_button, NULL, NULL);
+            } else if (key_event->state & ControlMask) { // Ctrl+Enter always sends
+                 send_message_callback(send_button, NULL, NULL);
+                *continue_to_dispatch = False;
+            } else { // Enter alone
+                if (enter_key_sends_message) { // Check the setting
+                    send_message_callback(send_button, NULL, NULL);
+                } else {
+                    XmTextInsert(input_text, XmTextGetCursorPosition(input_text), "\n");
+                }
                 *continue_to_dispatch = False;
             }
         } else {
-            *continue_to_dispatch = True; // Allow other keys to be processed by app_text_key_press_handler
+            *continue_to_dispatch = True; // Allow app_text_key_press_handler to see other Ctrl keys
         }
     } else {
         *continue_to_dispatch = True;
@@ -439,10 +458,15 @@ static void app_text_key_press_handler(Widget w, XtPointer client_data, XEvent *
     if (event->type == KeyPress) {
         XKeyEvent *key_event = (XKeyEvent *)event;
         KeySym keysym;
-        // Modifiers modifiers; // Not strictly needed if checking event->xkey.state directly
         char buffer[10]; XLookupString(key_event, buffer, sizeof(buffer)-1, &keysym, NULL);
 
         if (key_event->state & ControlMask) {
+            // Skip if it's Ctrl+Enter, as that's handled by input_text_key_press_handler
+            if (keysym == XK_Return || keysym == XK_KP_Enter) {
+                 *continue_to_dispatch = True;
+                 return;
+            }
+
             switch (keysym) {
                 case XK_x: case XK_X:
                     if (focused_text_widget && XmIsText(focused_text_widget) && XmTextGetEditable(focused_text_widget))
@@ -469,7 +493,32 @@ static void app_text_key_press_handler(Widget w, XtPointer client_data, XEvent *
 
 static void focus_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     XmAnyCallbackStruct *focus_data = (XmAnyCallbackStruct *)call_data;
-    if (focus_data->reason == XmCR_FOCUS) focused_text_widget = w;
+    if (focus_data->reason == XmCR_FOCUS) {
+        focused_text_widget = w;
+        if (w == openai_base_url_text) {
+            char *current_text = XmTextFieldGetString(w);
+            if (current_text && strcmp(current_text, DEFAULT_OPENAI_BASE_URL) == 0) {
+                Pixel current_fg;
+                XtVaGetValues(w, XmNforeground, &current_fg, NULL);
+                if (current_fg == grey_fg_color) {
+                    XmTextFieldSetString(w, "");
+                    XtVaSetValues(w, XmNforeground, normal_fg_color, NULL);
+                }
+            }
+            XtFree(current_text);
+        }
+    } else if (focus_data->reason == XmCR_LOSING_FOCUS) {
+         if (w == openai_base_url_text) {
+            char *current_text = XmTextFieldGetString(w);
+            if (current_text && strlen(current_text) == 0) {
+                XmTextFieldSetString(w, DEFAULT_OPENAI_BASE_URL);
+                XtVaSetValues(w, XmNforeground, grey_fg_color, NULL);
+            } else if (current_text && strcmp(current_text, DEFAULT_OPENAI_BASE_URL) != 0) {
+                XtVaSetValues(w, XmNforeground, normal_fg_color, NULL);
+            }
+            XtFree(current_text);
+        }
+    }
 }
 
 void cut_callback(Widget w, XtPointer client_data, XtPointer call_data) {
@@ -495,22 +544,20 @@ void select_all_callback(Widget w, XtPointer client_data, XtPointer call_data) {
 }
 
 static void popup_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch) {
-    if (event->type == ButtonPress && event->xbutton.button == 3) { // Button 3 for right-click
-        focused_text_widget = w; // Set the currently focused widget to the one that received the click
+    if (event->type == ButtonPress && event->xbutton.button == 3) {
+        focused_text_widget = w;
         if (popup_menu) {
             Boolean editable = XmTextGetEditable(focused_text_widget);
             XtSetSensitive(popup_cut_item, editable);
             XtSetSensitive(popup_paste_item, editable);
-            // Copy and Select All are always sensitive for text widgets
             XtSetSensitive(popup_copy_item, True);
             XtSetSensitive(popup_select_all_item, True);
-
             XmMenuPosition(popup_menu, (XButtonPressedEvent*)event);
             XtManageChild(popup_menu);
         }
-        *continue_to_dispatch = False; // We've handled the button press
+        *continue_to_dispatch = False;
     } else {
-        *continue_to_dispatch = True; // Allow other handlers to process other button presses
+        *continue_to_dispatch = True;
     }
 }
 
@@ -588,6 +635,7 @@ void load_settings() {
         const char* oe = getenv("OPENAI_API_KEY"); if (oe) strncpy(current_openai_api_key, oe, sizeof(current_openai_api_key)-1); else current_openai_api_key[0] = '\0';
         current_max_history_messages = DEFAULT_MAX_HISTORY_MESSAGES;
         history_limits_disabled = False;
+        enter_key_sends_message = True;
         return;
     }
     char line[512];
@@ -604,6 +652,8 @@ void load_settings() {
             else if (strcmp(key, "openai_base_url") == 0) strncpy(current_openai_base_url, value, sizeof(current_openai_base_url)-1);
             else if (strcmp(key, "max_history") == 0) current_max_history_messages = atoi(value);
             else if (strcmp(key, "history_limits_disabled") == 0) history_limits_disabled = (strcmp(value, "true") == 0);
+            else if (strcmp(key, "enter_sends_message") == 0) enter_key_sends_message = (strcmp(value, "true") == 0);
+
         }
     }
     fclose(fp); printf("Settings loaded from %s\n", settings_file);
@@ -626,6 +676,7 @@ void save_settings() {
     fprintf(fp, "openai_base_url=%s\n", current_openai_base_url);
     fprintf(fp, "max_history=%d\n", current_max_history_messages);
     fprintf(fp, "history_limits_disabled=%s\n", history_limits_disabled ? "true" : "false");
+    fprintf(fp, "enter_sends_message=%s\n", enter_key_sends_message ? "true" : "false");
     fclose(fp); printf("Settings saved to %s\n", settings_file);
 }
 
@@ -701,8 +752,7 @@ void initialize_dp_context() {
     if (dp_ctx) { dp_destroy_context(dp_ctx); dp_ctx = NULL; }
     const char* key_to_use = (current_api_provider == DP_PROVIDER_GOOGLE_GEMINI) ? current_gemini_api_key : current_openai_api_key;
     const char* model_to_use = (current_api_provider == DP_PROVIDER_GOOGLE_GEMINI) ? current_gemini_model : current_openai_model;
-    const char* base_url_to_use = (current_api_provider == DP_PROVIDER_OPENAI_COMPATIBLE && strlen(current_openai_base_url) > 0) ? current_openai_base_url : NULL;
-
+    const char* base_url_to_use = (current_api_provider == DP_PROVIDER_OPENAI_COMPATIBLE && strlen(current_openai_base_url) > 0 && strcmp(current_openai_base_url, DEFAULT_OPENAI_BASE_URL) != 0) ? current_openai_base_url : NULL;
 
     if (strlen(key_to_use) == 0) { fprintf(stderr, "API Key not set. LLM disabled until configured in Settings.\n"); return; }
     if (strlen(model_to_use) == 0) { fprintf(stderr, "Model ID not set. LLM disabled until configured in Settings.\n"); return; }
@@ -734,6 +784,31 @@ void settings_tab_change_callback(Widget w, XtPointer client_data, XtPointer cal
     if (settings_current_tab_content) XtManageChild(settings_current_tab_content);
 }
 
+static void openai_base_url_focus_in_cb(Widget w, XtPointer client_data, XtPointer call_data) {
+    char *current_text = XmTextFieldGetString(w);
+    if (current_text && strcmp(current_text, DEFAULT_OPENAI_BASE_URL) == 0) {
+        Pixel current_fg;
+        XtVaGetValues(w, XmNforeground, &current_fg, NULL);
+        if (current_fg == grey_fg_color) {
+            XmTextFieldSetString(w, "");
+            XtVaSetValues(w, XmNforeground, normal_fg_color, NULL);
+        }
+    }
+    XtFree(current_text);
+}
+
+static void openai_base_url_focus_out_cb(Widget w, XtPointer client_data, XtPointer call_data) {
+    char *current_text = XmTextFieldGetString(w);
+    if (current_text && strlen(current_text) == 0) {
+        XmTextFieldSetString(w, DEFAULT_OPENAI_BASE_URL);
+        XtVaSetValues(w, XmNforeground, grey_fg_color, NULL);
+    } else if (current_text && strcmp(current_text, DEFAULT_OPENAI_BASE_URL) != 0) {
+        XtVaSetValues(w, XmNforeground, normal_fg_color, NULL);
+    }
+    XtFree(current_text);
+}
+
+
 void populate_settings_dialog() {
     XmToggleButtonSetState(provider_gemini_rb, current_api_provider == DP_PROVIDER_GOOGLE_GEMINI, False);
     XmToggleButtonSetState(provider_openai_rb, current_api_provider == DP_PROVIDER_OPENAI_COMPATIBLE, False);
@@ -742,6 +817,7 @@ void populate_settings_dialog() {
     snprintf(hist_len_str, sizeof(hist_len_str), "%d", current_max_history_messages);
     XmTextFieldSetString(history_length_text, hist_len_str);
     XmToggleButtonSetState(disable_history_limit_toggle, history_limits_disabled, False);
+    XmToggleButtonSetState(enter_sends_message_toggle, enter_key_sends_message, False);
     XtSetSensitive(history_length_text, !history_limits_disabled);
 
 
@@ -749,7 +825,14 @@ void populate_settings_dialog() {
     XmTextFieldSetString(gemini_model_text, current_gemini_model); XmListDeleteAllItems(gemini_model_list);
     XmTextFieldSetString(openai_api_key_text, current_openai_api_key);
     XmTextFieldSetString(openai_model_text, current_openai_model);
-    XmTextFieldSetString(openai_base_url_text, current_openai_base_url);
+
+    if (strlen(current_openai_base_url) == 0) {
+        XmTextFieldSetString(openai_base_url_text, DEFAULT_OPENAI_BASE_URL);
+        XtVaSetValues(openai_base_url_text, XmNforeground, grey_fg_color, NULL);
+    } else {
+        XmTextFieldSetString(openai_base_url_text, current_openai_base_url);
+        XtVaSetValues(openai_base_url_text, XmNforeground, normal_fg_color, NULL);
+    }
     XmListDeleteAllItems(openai_model_list);
 }
 
@@ -762,6 +845,7 @@ void retrieve_settings_from_dialog() {
     if (current_max_history_messages <= 0 && !history_limits_disabled) current_max_history_messages = DEFAULT_MAX_HISTORY_MESSAGES;
     XtFree(hist_len_str);
     history_limits_disabled = XmToggleButtonGetState(disable_history_limit_toggle);
+    enter_key_sends_message = XmToggleButtonGetState(enter_sends_message_toggle);
 
 
     char *tmp;
@@ -769,7 +853,22 @@ void retrieve_settings_from_dialog() {
     tmp = XmTextFieldGetString(gemini_model_text); strncpy(current_gemini_model, tmp, sizeof(current_gemini_model)-1); current_gemini_model[sizeof(current_gemini_model)-1]='\0'; XtFree(tmp);
     tmp = XmTextFieldGetString(openai_api_key_text); strncpy(current_openai_api_key, tmp, sizeof(current_openai_api_key)-1); current_openai_api_key[sizeof(current_openai_api_key)-1]='\0'; XtFree(tmp);
     tmp = XmTextFieldGetString(openai_model_text); strncpy(current_openai_model, tmp, sizeof(current_openai_model)-1); current_openai_model[sizeof(current_openai_model)-1]='\0'; XtFree(tmp);
-    tmp = XmTextFieldGetString(openai_base_url_text); strncpy(current_openai_base_url, tmp, sizeof(current_openai_base_url)-1); current_openai_base_url[sizeof(current_openai_base_url)-1]='\0'; XtFree(tmp);
+
+    tmp = XmTextFieldGetString(openai_base_url_text);
+    if (strcmp(tmp, DEFAULT_OPENAI_BASE_URL) == 0) {
+        Pixel current_fg;
+        XtVaGetValues(openai_base_url_text, XmNforeground, &current_fg, NULL);
+        if (current_fg == grey_fg_color) {
+            current_openai_base_url[0] = '\0';
+        } else {
+             strncpy(current_openai_base_url, tmp, sizeof(current_openai_base_url)-1);
+             current_openai_base_url[sizeof(current_openai_base_url)-1]='\0';
+        }
+    } else {
+        strncpy(current_openai_base_url, tmp, sizeof(current_openai_base_url)-1);
+        current_openai_base_url[sizeof(current_openai_base_url)-1]='\0';
+    }
+    XtFree(tmp);
 }
 
 void settings_apply_callback(Widget w, XtPointer client_data, XtPointer call_data) {
@@ -835,9 +934,15 @@ void settings_get_models_callback(Widget w, XtPointer client_data, XtPointer cal
     thread_data->provider = provider_for_list;
     strncpy(thread_data->api_key_for_list, api_key_str, sizeof(thread_data->api_key_for_list)-1);
     thread_data->api_key_for_list[sizeof(thread_data->api_key_for_list)-1] = '\0';
-    if (base_url_str && strlen(base_url_str) > 0) {
-        strncpy(thread_data->base_url_for_list, base_url_str, sizeof(thread_data->base_url_for_list)-1);
-        thread_data->base_url_for_list[sizeof(thread_data->base_url_for_list)-1] = '\0';
+
+    if (base_url_str && strlen(base_url_str) > 0 && strcmp(base_url_str, DEFAULT_OPENAI_BASE_URL) != 0) {
+        Pixel current_fg; XtVaGetValues(openai_base_url_text, XmNforeground, &current_fg, NULL);
+        if (current_fg != grey_fg_color) { // Only use it if it's not the placeholder
+            strncpy(thread_data->base_url_for_list, base_url_str, sizeof(thread_data->base_url_for_list)-1);
+            thread_data->base_url_for_list[sizeof(thread_data->base_url_for_list)-1] = '\0';
+        } else {
+             thread_data->base_url_for_list[0] = '\0'; // Use default
+        }
     } else {
         thread_data->base_url_for_list[0] = '\0';
     }
@@ -863,18 +968,18 @@ void settings_use_selected_model_callback(Widget w, XtPointer client_data, XtPoi
 
 void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     if (settings_shell == NULL) {
-        settings_shell = XtVaCreatePopupShell("settingsShell", topLevelShellWidgetClass, app_shell, XmNtitle, "MotifGPT Settings", XmNwidth, 550, XmNheight, 500, NULL);
-        Widget dialog_form = XtVaCreateManagedWidget("dialogForm", xmFormWidgetClass, settings_shell, NULL);
-        Widget tab_button_rc = XtVaCreateManagedWidget("tabButtonRc", xmRowColumnWidgetClass, dialog_form, XmNorientation, XmHORIZONTAL, XmNradioBehavior, True, XmNindicatorType, XmONE_OF_MANY, XmNentryAlignment, XmALIGNMENT_CENTER, XmNpacking, XmPACK_TIGHT, XmNtopAttachment, XmATTACH_FORM, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, 5, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5, NULL);
-        Widget general_tab_btn = XtVaCreateManagedWidget("General", xmToggleButtonWidgetClass, tab_button_rc, XmNindicatorOn, False, NULL);
-        Widget gemini_tab_btn = XtVaCreateManagedWidget("Gemini", xmToggleButtonWidgetClass, tab_button_rc, XmNindicatorOn, False, NULL);
-        Widget openai_tab_btn = XtVaCreateManagedWidget("OpenAI", xmToggleButtonWidgetClass, tab_button_rc, XmNindicatorOn, False, NULL);
+        settings_shell = XtVaCreatePopupShell("settingsShell", topLevelShellWidgetClass, app_shell, XmNtitle, "MotifGPT Settings", XmNwidth, 550, XmNheight, 550, NULL);
+        Widget dialog_form = XtVaCreateManagedWidget("dialogForm", xmFormWidgetClass, settings_shell, XmNverticalSpacing, 5, XmNhorizontalSpacing, 5, NULL);
+        Widget tab_button_rc = XtVaCreateManagedWidget("tabButtonRc", xmRowColumnWidgetClass, dialog_form, XmNorientation, XmHORIZONTAL, XmNradioBehavior, True, XmNindicatorType, XmONE_OF_MANY, XmNentryAlignment, XmALIGNMENT_CENTER, XmNpacking, XmPACK_TIGHT, XmNspacing, 0, XmNtopAttachment, XmATTACH_FORM, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, 5, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5, XmNshadowThickness, 0, NULL);
+        Widget general_tab_btn = XtVaCreateManagedWidget("General", xmToggleButtonWidgetClass, tab_button_rc, XmNindicatorOn, False, XmNshadowThickness, 2, NULL);
+        Widget gemini_tab_btn = XtVaCreateManagedWidget("Gemini", xmToggleButtonWidgetClass, tab_button_rc, XmNindicatorOn, False, XmNshadowThickness, 2, NULL);
+        Widget openai_tab_btn = XtVaCreateManagedWidget("OpenAI", xmToggleButtonWidgetClass, tab_button_rc, XmNindicatorOn, False, XmNshadowThickness, 2, NULL);
         XtAddCallback(general_tab_btn, XmNvalueChangedCallback, settings_tab_change_callback, (XtPointer)0);
         XtAddCallback(gemini_tab_btn, XmNvalueChangedCallback, settings_tab_change_callback, (XtPointer)1);
         XtAddCallback(openai_tab_btn, XmNvalueChangedCallback, settings_tab_change_callback, (XtPointer)2);
         Widget content_frame = XtVaCreateManagedWidget("contentFrame", xmFrameWidgetClass, dialog_form, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, tab_button_rc, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, 5, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 45, XmNshadowType, XmSHADOW_ETCHED_IN, NULL);
 
-        settings_general_tab_content = XtVaCreateWidget("generalTab", xmFormWidgetClass, content_frame, XmNmarginWidth, 10, XmNmarginHeight, 10, NULL);
+        settings_general_tab_content = XtVaCreateWidget("generalTab", xmFormWidgetClass, content_frame, XmNmarginWidth, 10, XmNmarginHeight, 10, XmNtopOffset, 10, XmNleftOffset, 10, XmNrightOffset, 10, XmNbottomOffset, 10, NULL);
         Widget provider_label = XtVaCreateManagedWidget("Model API Provider:", xmLabelWidgetClass, settings_general_tab_content, XmNtopAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, XmNalignment, XmALIGNMENT_BEGINNING, NULL);
         Widget provider_radio_box = XmCreateRadioBox(settings_general_tab_content, "providerRadioBox", NULL, 0);
         XtVaSetValues(provider_radio_box, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, provider_label, XmNleftAttachment, XmATTACH_FORM, XmNorientation, XmHORIZONTAL, NULL);
@@ -885,8 +990,10 @@ void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
         history_length_text = XtVaCreateManagedWidget("historyLengthText", xmTextFieldWidgetClass, settings_general_tab_content, XmNcolumns, 5, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, provider_radio_box, XmNtopOffset, 10, XmNleftAttachment, XmATTACH_WIDGET, XmNleftWidget, history_label, XmNleftOffset, 5, NULL);
         disable_history_limit_toggle = XtVaCreateManagedWidget("Disable Message History FIFO Limit", xmToggleButtonWidgetClass, settings_general_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, history_length_text, XmNtopOffset, 10, XmNleftAttachment, XmATTACH_FORM, NULL);
         XtAddCallback(disable_history_limit_toggle, XmNvalueChangedCallback, settings_disable_history_limit_toggle_cb, NULL);
+        enter_sends_message_toggle = XtVaCreateManagedWidget("Enter key sends message (unchecked) / inserts newline (checked)", xmToggleButtonWidgetClass, settings_general_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, disable_history_limit_toggle, XmNtopOffset, 10, XmNleftAttachment, XmATTACH_FORM, NULL);
 
-        settings_gemini_tab_content = XtVaCreateWidget("geminiTab", xmFormWidgetClass, content_frame, XmNmarginWidth, 10, XmNmarginHeight, 10, NULL);
+
+        settings_gemini_tab_content = XtVaCreateWidget("geminiTab", xmFormWidgetClass, content_frame, XmNmarginWidth, 10, XmNmarginHeight, 10, XmNtopOffset, 10, XmNleftOffset, 10, XmNrightOffset, 10, XmNbottomOffset, 10, NULL);
         Widget gemini_api_label = XtVaCreateManagedWidget("API Key:", xmLabelWidgetClass, settings_gemini_tab_content, XmNtopAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, XmNalignment, XmALIGNMENT_BEGINNING, NULL);
         gemini_api_key_text = XtVaCreateManagedWidget("geminiApiKeyText", xmTextFieldWidgetClass, settings_gemini_tab_content, XmNcolumns, 40, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, gemini_api_label, XmNtopOffset, 2, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, NULL);
         Widget gemini_model_label = XtVaCreateManagedWidget("Model ID:", xmLabelWidgetClass, settings_gemini_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, gemini_api_key_text, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNalignment, XmALIGNMENT_BEGINNING, NULL);
@@ -899,11 +1006,13 @@ void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
         XtVaSetValues(XtParent(gemini_model_list), XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, gemini_get_models_btn, XmNtopOffset,5, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM,NULL);
         XtManageChild(gemini_model_list);
 
-        settings_openai_tab_content = XtVaCreateWidget("openaiTab", xmFormWidgetClass, content_frame, XmNmarginWidth, 10, XmNmarginHeight, 10, NULL);
+        settings_openai_tab_content = XtVaCreateWidget("openaiTab", xmFormWidgetClass, content_frame, XmNmarginWidth, 10, XmNmarginHeight, 10, XmNtopOffset, 10, XmNleftOffset, 10, XmNrightOffset, 10, XmNbottomOffset, 10, NULL);
         Widget openai_api_label = XtVaCreateManagedWidget("API Key:", xmLabelWidgetClass, settings_openai_tab_content, XmNtopAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, XmNalignment, XmALIGNMENT_BEGINNING, NULL);
         openai_api_key_text = XtVaCreateManagedWidget("openaiApiKeyText", xmTextFieldWidgetClass, settings_openai_tab_content, XmNcolumns, 40, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_api_label, XmNtopOffset, 2, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, NULL);
         Widget openai_base_url_label = XtVaCreateManagedWidget("API Base URL (optional):", xmLabelWidgetClass, settings_openai_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_api_key_text, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNalignment, XmALIGNMENT_BEGINNING, NULL);
         openai_base_url_text = XtVaCreateManagedWidget("openaiBaseUrlText", xmTextFieldWidgetClass, settings_openai_tab_content, XmNcolumns, 40, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_base_url_label, XmNtopOffset, 2, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, NULL);
+        XtAddCallback(openai_base_url_text, XmNfocusCallback, openai_base_url_focus_in_cb, NULL);
+        XtAddCallback(openai_base_url_text, XmNlosingFocusCallback, openai_base_url_focus_out_cb, NULL);
         Widget openai_model_label = XtVaCreateManagedWidget("Model ID:", xmLabelWidgetClass, settings_openai_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_base_url_text, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNalignment, XmALIGNMENT_BEGINNING, NULL);
         openai_model_text = XtVaCreateManagedWidget("openaiModelText", xmTextFieldWidgetClass, settings_openai_tab_content, XmNcolumns, 40, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_model_label, XmNtopOffset, 2, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, NULL);
         Widget openai_get_models_btn = XtVaCreateManagedWidget("Get Models", xmPushButtonWidgetClass, settings_openai_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_model_text, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, NULL);
@@ -914,15 +1023,21 @@ void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
         XtVaSetValues(XtParent(openai_model_list), XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_get_models_btn, XmNtopOffset,5, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM,NULL);
         XtManageChild(openai_model_list);
 
-        Widget button_form = XtVaCreateManagedWidget("buttonForm", xmFormWidgetClass, dialog_form, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 5, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, 5, NULL);
-        Widget ok_button = XtVaCreateManagedWidget("OK", xmPushButtonWidgetClass, button_form, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_NONE, XmNtopAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM, NULL);
-        Widget cancel_button = XtVaCreateManagedWidget("Cancel", xmPushButtonWidgetClass, button_form, XmNleftAttachment, XmATTACH_WIDGET, XmNleftWidget, ok_button, XmNleftOffset, 5, XmNrightAttachment, XmATTACH_NONE, XmNtopAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM, NULL);
-        Widget apply_button = XtVaCreateManagedWidget("Apply", xmPushButtonWidgetClass, button_form, XmNleftAttachment, XmATTACH_WIDGET, XmNleftWidget, cancel_button, XmNleftOffset, 5, XmNrightAttachment, XmATTACH_NONE, XmNtopAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM, NULL);
-        XtVaSetValues(button_form, XmNdefaultButton, ok_button, NULL);
+        Widget button_rc_bottom = XtVaCreateManagedWidget("buttonRcBottom", xmRowColumnWidgetClass, dialog_form,
+                                                   XmNorientation, XmHORIZONTAL, XmNpacking, XmPACK_TIGHT,
+                                                   XmNentryAlignment, XmALIGNMENT_CENTER, XmNspacing, 10,
+                                                   XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 5,
+                                                   XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5,
+                                                   NULL);
+        Widget ok_button = XtVaCreateManagedWidget("OK", xmPushButtonWidgetClass, button_rc_bottom, NULL);
+        Widget cancel_button = XtVaCreateManagedWidget("Cancel", xmPushButtonWidgetClass, button_rc_bottom, NULL);
+        Widget apply_button = XtVaCreateManagedWidget("Apply", xmPushButtonWidgetClass, button_rc_bottom, NULL);
 
         XtAddCallback(ok_button, XmNactivateCallback, settings_ok_callback, NULL);
-        XtAddCallback(apply_button, XmNactivateCallback, settings_apply_callback, NULL);
         XtAddCallback(cancel_button, XmNactivateCallback, settings_cancel_callback, NULL);
+        XtAddCallback(apply_button, XmNactivateCallback, settings_apply_callback, NULL);
+        XtVaSetValues(dialog_form, XmNdefaultButton, ok_button, NULL);
+
         XmToggleButtonSetState(general_tab_btn, True, True);
     }
     populate_settings_dialog();
@@ -963,6 +1078,20 @@ int main(int argc, char **argv) {
 
     app_shell = XtAppInitialize(&app_context, "MotifGPT", NULL, 0, &argc, argv, NULL, NULL, 0);
     XtAddCallback(app_shell, XmNdestroyCallback, quit_callback, NULL);
+
+    Display *dpy = XtDisplay(app_shell);
+    Colormap cmap = DefaultColormap(dpy, DefaultScreen(dpy));
+    XColor xcolor_grey_val, xcolor_exact_grey;
+    if (XAllocNamedColor(dpy, cmap, "grey70", &xcolor_grey_val, &xcolor_exact_grey)) {
+        grey_fg_color = xcolor_grey_val.pixel;
+    } else {
+        grey_fg_color = WhitePixel(dpy, DefaultScreen(dpy)) / 2 + BlackPixel(dpy, DefaultScreen(dpy)) / 2 ;
+    }
+    Widget temp_tf = XmCreateTextField(app_shell, "tempTf", NULL, 0);
+    XtVaGetValues(temp_tf, XmNforeground, &normal_fg_color, NULL);
+    XtDestroyWidget(temp_tf);
+
+
     main_window = XmCreateMainWindow(app_shell, "mainWindow", NULL, 0); XtManageChild(main_window);
     menu_bar = XmCreateMenuBar(main_window, "menuBar", NULL, 0); XtManageChild(menu_bar);
 
@@ -1022,7 +1151,7 @@ int main(int argc, char **argv) {
     XtManageChild(input_text); XtManageChild(scrolled_input_win);
     XmScrolledWindowSetAreas(scrolled_input_win, NULL, NULL, input_text);
     XtAddEventHandler(input_text, KeyPressMask, False, input_text_key_press_handler, NULL);
-    XtAddEventHandler(input_text, KeyPressMask, True, app_text_key_press_handler, NULL); // Pass True to allow other handlers
+    XtAddEventHandler(input_text, KeyPressMask, True, app_text_key_press_handler, NULL);
     XtAddCallback(input_text, XmNfocusCallback, focus_callback, NULL);
     XtAddEventHandler(input_text, ButtonPressMask, False, popup_handler, NULL);
 
