@@ -11,6 +11,8 @@
 #include <Xm/Separator.h>
 #include <Xm/MessageB.h>
 #include <Xm/CutPaste.h>
+#include <X11/keysym.h> // For XK_Return, XK_KP_Enter, XK_F, etc.
+#include <X11/Xlib.h>   // For KeySym, XLookupString, XKeyEvent
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -90,7 +92,6 @@ void append_to_assistant_buffer(const char* text) {
         char *new_buf = realloc(current_assistant_response_buffer, current_assistant_response_capacity);
         if (!new_buf) {
             perror("Failed to realloc assistant response buffer");
-            // Potentially lose some of the assistant's response for history
             free(current_assistant_response_buffer);
             current_assistant_response_buffer = NULL;
             current_assistant_response_len = 0;
@@ -114,7 +115,6 @@ int stream_handler(const char* token, void* user_data, bool is_final, const char
         }
         assistant_is_replying = false;
         prefix_already_added_for_current_reply = false;
-        // Clear partial assistant response buffer on error
         if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
         current_assistant_response_len = 0;
         return 1;
@@ -122,13 +122,12 @@ int stream_handler(const char* token, void* user_data, bool is_final, const char
 
     if (!assistant_is_replying) {
         assistant_is_replying = true;
-        // Initialize buffer for new assistant response
         if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
         current_assistant_response_len = 0;
     }
 
     if (token) {
-        append_to_assistant_buffer(token); // Accumulate for history
+        append_to_assistant_buffer(token);
         if (write(pipe_fds[1], token, strlen(token)) == -1) {
             perror("stream_handler: write token to pipe");
             assistant_is_replying = false;
@@ -144,8 +143,6 @@ int stream_handler(const char* token, void* user_data, bool is_final, const char
         if (write(pipe_fds[1], end_marker, strlen(end_marker)) == -1) {
             perror("stream_handler: write end_marker to pipe");
         }
-        // The full response is now in current_assistant_response_buffer
-        // It will be added to history by handle_pipe_input after the END_OF_STREAM marker
         assistant_is_replying = false;
         prefix_already_added_for_current_reply = false;
     }
@@ -164,11 +161,10 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
                  append_to_conversation(actual_content);
              }
             append_to_conversation("\n");
-            // Add complete assistant message to history
             if (current_assistant_response_buffer && current_assistant_response_len > 0) {
                 add_message_to_history(DP_ROLE_ASSISTANT, current_assistant_response_buffer);
             }
-            if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0'; // Reset buffer
+            if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
             current_assistant_response_len = 0;
 
         } else if (strncmp(buffer, "Stream Error:", 13) == 0) {
@@ -194,11 +190,7 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
 
 void add_message_to_history(dp_message_role_t role, const char* text_content) {
     if (chat_history_count >= MAX_HISTORY_MESSAGES) {
-        // Simple FIFO: remove the oldest message (or pair for user/assistant)
-        // For simplicity, let's just warn and not add if full, or implement FIFO later
         fprintf(stderr, "Chat history full. Not adding new message.\n");
-        // A more robust solution would remove the oldest one or two messages.
-        // For now, we'll just stop adding.
         return;
     }
 
@@ -209,21 +201,18 @@ void add_message_to_history(dp_message_role_t role, const char* text_content) {
         dp_message_t *new_history = realloc(chat_history, chat_history_capacity * sizeof(dp_message_t));
         if (!new_history) {
             perror("Failed to realloc chat history");
-            return; // Cannot add message
+            return;
         }
         chat_history = new_history;
     }
 
     dp_message_t *new_msg = &chat_history[chat_history_count];
     new_msg->role = role;
-    new_msg->num_parts = 0; // Will be 1 after adding text part
-    new_msg->parts = NULL;  // dp_message_add_text_part will allocate
+    new_msg->num_parts = 0;
+    new_msg->parts = NULL;
 
-    // dp_message_add_text_part allocates its own copy of text_content
     if (!dp_message_add_text_part(new_msg, text_content)) {
         fprintf(stderr, "Failed to add text part to history message.\n");
-        // Don't increment count if adding part failed
-        // dp_message_add_text_part should free its own stuff on failure
     } else {
         chat_history_count++;
     }
@@ -231,7 +220,6 @@ void add_message_to_history(dp_message_role_t role, const char* text_content) {
 
 void free_chat_history() {
     if (chat_history) {
-        // dp_free_messages iterates through the messages and frees parts
         dp_free_messages(chat_history, chat_history_count);
         free(chat_history);
         chat_history = NULL;
@@ -255,13 +243,13 @@ void send_message_callback(Widget w, XtPointer client_data, XtPointer call_data)
     char display_user_msg[1024];
     snprintf(display_user_msg, sizeof(display_user_msg), "%s: %s\n", USER_NICKNAME, input_string_raw);
     append_to_conversation(display_user_msg);
-    add_message_to_history(DP_ROLE_USER, input_string_raw); // Add user message to history
+    add_message_to_history(DP_ROLE_USER, input_string_raw);
     XmTextSetString(input_text, "");
 
 
     if (!dp_ctx) {
         show_error_dialog("Disaster Party context not initialized.");
-        XtFree(input_string_raw); return; // input_string_raw already freed if used by add_message_to_history
+        XtFree(input_string_raw); return;
     }
 
     dp_request_config_t request_config = {0};
@@ -269,18 +257,10 @@ void send_message_callback(Widget w, XtPointer client_data, XtPointer call_data)
     request_config.temperature = 0.7;
     request_config.max_tokens = 1024;
     request_config.stream = true;
-
-    // Use the entire chat history for the request
     request_config.messages = chat_history;
     request_config.num_messages = chat_history_count;
 
-
-    // Note: input_string_raw was already added to history, no need to free it here again
-    // if add_message_to_history makes a copy (which dp_message_add_text_part does).
-    // If add_message_to_history failed, input_string_raw might still need freeing if not used.
-    // However, dp_message_add_text_part handles its own string copy.
-    // The original input_string_raw from XmTextGetString is effectively consumed or copied by add_message_to_history.
-    XtFree(input_string_raw); // Safe to free the XmTextGetString result now.
+    XtFree(input_string_raw);
 
 
     snprintf(current_assistant_prefix, sizeof(current_assistant_prefix), "%s: ", ASSISTANT_NICKNAME);
@@ -298,7 +278,6 @@ void send_message_callback(Widget w, XtPointer client_data, XtPointer call_data)
         show_error_dialog(error_buf);
         append_to_conversation(error_buf);
     }
-    // dp_free_messages for request_config.messages (chat_history) is handled by free_chat_history()
     dp_free_response_content(&response_status);
 }
 
@@ -315,10 +294,9 @@ void quit_callback(Widget w, XtPointer client_data, XtPointer call_data) {
 }
 
 void clear_chat_callback(Widget w, XtPointer client_data, XtPointer call_data) {
-    XmTextSetString(conversation_text, ""); // Clear visual display
-    free_chat_history(); // Clear internal history
-    append_to_conversation("Chat cleared. Welcome to MotifGPT!\n"); // Optional: re-add welcome
-    // Reset any assistant reply state, though it should be idle
+    XmTextSetString(conversation_text, "");
+    free_chat_history();
+    append_to_conversation("Chat cleared. Welcome to MotifGPT!\n");
     assistant_is_replying = false;
     prefix_already_added_for_current_reply = false;
     if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
@@ -339,23 +317,30 @@ void show_error_dialog(const char* message) {
 static void handle_input_key_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch) {
     if (event->type == KeyPress) {
         XKeyEvent *key_event = (XKeyEvent *)event;
-        KeySym keysym = XkbKeycodeToKeysym(XtDisplay(w), key_event->keycode, 0, (key_event->state & ShiftMask) ? 1 : 0);
+        KeySym keysym;
+        char buffer[1]; // XLookupString needs a buffer, though we only use keysym here
+        // Use XLookupString to get the KeySym, respecting modifiers for Shift, etc.
+        XLookupString(key_event, buffer, 1, &keysym, NULL);
 
-        if (keysym == XK_Return || keysym == XK_KP_Enter) {
-            if (key_event->state & ShiftMask) {
+
+        if (keysym == XK_Return || keysym == XK_KP_Enter) { // XK_KP_Enter for numpad Enter
+            if (key_event->state & ShiftMask) { // Check if Shift key is pressed
+                // Insert newline character into the text widget
                 XmTextInsert(input_text, XmTextGetCursorPosition(input_text), "\n");
-                *continue_to_dispatch = False;
-            } else {
+                *continue_to_dispatch = False; // Event handled, don't process further
+            } else { // Enter only (no Shift)
+                // Trigger the send message callback
                 send_message_callback(send_button, NULL, NULL);
-                *continue_to_dispatch = False;
+                *continue_to_dispatch = False; // Event handled
             }
         }
     }
 }
 
 static void focus_callback(Widget w, XtPointer client_data, XtPointer call_data) {
-    XmFocusCallbackStruct *focus_data = (XmFocusCallbackStruct *)call_data;
-    if (focus_data->reason == XmCR_FOCUS) {
+    // The call_data for XmNfocusCallback is XmAnyCallbackStruct.
+    XmAnyCallbackStruct *focus_data = (XmAnyCallbackStruct *)call_data;
+    if (focus_data->reason == XmCR_FOCUS) { // Check the reason for the callback
         focused_text_widget = w;
     }
 }
@@ -390,15 +375,14 @@ void select_all_callback(Widget w, XtPointer client_data, XtPointer call_data) {
 
 int main(int argc, char **argv) {
     XtAppContext app_context;
-    Widget main_window, menu_bar, main_form; // Removed icon_panel_form
+    Widget main_window, menu_bar, main_form;
     Widget chat_area_paned, input_form, bottom_buttons_form;
-    Widget file_menu, file_cascade, quit_button_widget, clear_chat_button, file_sep_exit; // Added clear chat items
+    Widget file_menu, file_cascade, quit_button_widget, clear_chat_button, file_sep_exit;
     Widget edit_menu, edit_cascade;
     Widget cut_button, copy_button, paste_button, select_all_button, edit_sep;
     XmString acc_text_ctrl_q, acc_text_ctrl_x, acc_text_ctrl_c, acc_text_ctrl_v, acc_text_ctrl_a;
 
-    // Initialize assistant response buffer
-    current_assistant_response_capacity = 1024; // Initial capacity
+    current_assistant_response_capacity = 1024;
     current_assistant_response_buffer = malloc(current_assistant_response_capacity);
     if (!current_assistant_response_buffer) {
         perror("Failed to allocate initial assistant response buffer"); return 1;
@@ -488,7 +472,7 @@ int main(int argc, char **argv) {
 
     chat_area_paned = XtVaCreateManagedWidget("chatAreaPaned", xmPanedWindowWidgetClass, main_form,
                                               XmNtopAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM,
-                                              XmNleftAttachment, XmATTACH_FORM, // Changed from XmATTACH_WIDGET
+                                              XmNleftAttachment, XmATTACH_FORM,
                                               XmNrightAttachment, XmATTACH_FORM, XmNsashWidth, 1, XmNsashHeight, 1, NULL);
     Widget scrolled_conv_win = XmCreateScrolledWindow(chat_area_paned, "scrolledConvWin", NULL, 0);
     XtVaSetValues(scrolled_conv_win, XmNpaneMinimum, 100, XmNpaneMaximum, 1000, NULL);
@@ -535,9 +519,8 @@ int main(int argc, char **argv) {
     append_to_conversation("Welcome to MotifGPT! Type message, Shift+Enter for newline, Enter to send.\n");
     XtAppMainLoop(app_context);
 
-    // Cleanup is mostly in quit_callback
     if (current_assistant_response_buffer) free(current_assistant_response_buffer);
-    free_chat_history(); // Ensure history is freed if loop exits abnormally
+    free_chat_history();
     if (dp_ctx) dp_destroy_context(dp_ctx);
     curl_global_cleanup();
     if (pipe_fds[0] != -1) close(pipe_fds[0]);
