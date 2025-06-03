@@ -4,17 +4,19 @@
 #include <Xm/Form.h>
 #include <Xm/Label.h>
 #include <Xm/PushB.h>
-#include <Xm/ToggleB.h> // For tab buttons
+#include <Xm/ToggleB.h>
 #include <Xm/Text.h>
-#include <Xm/TextF.h> // For TextField (API Key, Model)
+#include <Xm/TextF.h>
 #include <Xm/ScrolledW.h>
 #include <Xm/PanedW.h>
 #include <Xm/CascadeB.h>
 #include <Xm/Separator.h>
 #include <Xm/MessageB.h>
 #include <Xm/CutPaste.h>
-#include <Xm/List.h>     // For model list (better than OptionMenu for many items)
-#include <Xm/Frame.h>    // For tab content area
+#include <Xm/List.h>
+#include <Xm/Frame.h>
+#include <Xm/FileSB.h>
+
 #include <X11/keysym.h>
 #include <X11/Xlib.h>
 
@@ -24,7 +26,12 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <pthread.h> // For threading
+#include <pthread.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <libgen.h>
+#include <wordexp.h>
+#include <limits.h> // For INT_MAX
 
 #include "disasterparty.h"
 #include <curl/curl.h>
@@ -32,10 +39,14 @@
 // --- Configuration ---
 #define DEFAULT_PROVIDER DP_PROVIDER_GOOGLE_GEMINI
 #define DEFAULT_MODEL_GEMINI "gemini-2.0-flash"
-#define DEFAULT_MODEL_OPENAI "gpt-4.1-nano" // Example
+#define DEFAULT_MODEL_OPENAI "gpt-4.1-nano"
 #define USER_NICKNAME "User"
 #define ASSISTANT_NICKNAME "Assistant"
-#define MAX_HISTORY_MESSAGES 100
+#define DEFAULT_MAX_HISTORY_MESSAGES 100
+#define INTERNAL_MAX_HISTORY_CAPACITY 10000 // Safeguard for "unlimited" history
+#define CONFIG_DIR_MODE 0755
+#define CONFIG_FILE_NAME "settings.conf"
+#define CACHE_DIR_NAME "cache"
 // --- End Configuration ---
 
 // Globals
@@ -43,28 +54,33 @@ Widget app_shell;
 Widget conversation_text;
 Widget input_text;
 Widget send_button;
+Widget attach_image_button;
 Widget focused_text_widget = NULL;
+Widget popup_menu = NULL;
+Widget popup_cut_item, popup_paste_item;
 
-// Settings Dialog Globals
 Widget settings_shell = NULL;
 Widget settings_general_tab_content, settings_gemini_tab_content, settings_openai_tab_content;
 Widget settings_current_tab_content = NULL;
 Widget provider_gemini_rb, provider_openai_rb;
 Widget gemini_api_key_text, gemini_model_text, gemini_model_list;
 Widget openai_api_key_text, openai_model_text, openai_model_list;
+Widget history_length_text; // New for settings
+Widget disable_history_limit_toggle; // New for settings
 
-
-// Current API Settings (to be loaded/saved, for now, in-memory)
 dp_provider_type_t current_api_provider = DEFAULT_PROVIDER;
 char current_gemini_api_key[256] = "";
 char current_gemini_model[128] = DEFAULT_MODEL_GEMINI;
 char current_openai_api_key[256] = "";
 char current_openai_model[128] = DEFAULT_MODEL_OPENAI;
+int current_max_history_messages = DEFAULT_MAX_HISTORY_MESSAGES; // Tunable limit
+Boolean history_limits_disabled = False; // Flag for disabling FIFO limit
 
+char attached_image_path[PATH_MAX] = "";
+char attached_image_mime_type[64] = "";
+char *attached_image_base64_data = NULL;
 
 dp_context_t *dp_ctx = NULL;
-// char *api_key = NULL; // Will use current_gemini_api_key or current_openai_api_key
-
 int pipe_fds[2];
 bool assistant_is_replying = false;
 char current_assistant_prefix[64];
@@ -77,116 +93,87 @@ char *current_assistant_response_buffer = NULL;
 size_t current_assistant_response_len = 0;
 size_t current_assistant_response_capacity = 0;
 
-// Pipe Message Structure
 typedef enum {
-    PIPE_MSG_TOKEN,
-    PIPE_MSG_STREAM_END,
-    PIPE_MSG_ERROR,
-    PIPE_MSG_MODEL_LIST_ITEM, // For settings dialog model list
-    PIPE_MSG_MODEL_LIST_END,  // For settings dialog model list
-    PIPE_MSG_MODEL_LIST_ERROR // For settings dialog model list
+    PIPE_MSG_TOKEN, PIPE_MSG_STREAM_END, PIPE_MSG_ERROR,
+    PIPE_MSG_MODEL_LIST_ITEM, PIPE_MSG_MODEL_LIST_END, PIPE_MSG_MODEL_LIST_ERROR
 } pipe_message_type_t;
+typedef struct { pipe_message_type_t type; char data[512]; } pipe_message_t;
+typedef struct { dp_request_config_t config; } llm_thread_data_t;
+typedef struct { dp_provider_type_t provider; char api_key_for_list[256]; } get_models_thread_data_t;
 
-typedef struct {
-    pipe_message_type_t type;
-    char data[512]; // Increased size for model names or longer errors
-} pipe_message_t;
-
-
-// Thread data for LLM request
-typedef struct {
-    dp_request_config_t config; // A copy of the config for the thread
-    // Need to be careful with dp_message_t array if it's dynamically sized
-    // For now, assuming chat_history is stable during the thread's operation
-    // or a deep copy is made if necessary.
-    // For simplicity, the thread will use the global chat_history directly,
-    // assuming send_message_callback serializes calls.
-} llm_thread_data_t;
-
-// Thread data for Get Models request
-typedef struct {
-    dp_provider_type_t provider;
-    char api_key_for_list[256];
-    Widget target_list_widget; // To populate directly or signal update
-} get_models_thread_data_t;
-
-
-// Function Prototypes (main app)
-void send_message_callback(Widget w, XtPointer client_data, XtPointer call_data);
-int stream_handler(const char* token, void* user_data, bool is_final, const char* error_during_stream);
-void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id);
-void quit_callback(Widget w, XtPointer client_data, XtPointer call_data);
-void show_error_dialog(const char* message);
-static void handle_input_key_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch);
-static void focus_callback(Widget w, XtPointer client_data, XtPointer call_data);
-void clear_chat_callback(Widget w, XtPointer client_data, XtPointer call_data);
-void add_message_to_history(dp_message_role_t role, const char* text_content);
+// Function Prototypes (rest are as before)
+void settings_disable_history_limit_toggle_cb(Widget, XtPointer, XtPointer);
+// ... (other prototypes as before) ...
+void send_message_callback(Widget, XtPointer, XtPointer);
+int stream_handler(const char*, void*, bool, const char*);
+void handle_pipe_input(XtPointer, int*, XtInputId*);
+void quit_callback(Widget, XtPointer, XtPointer);
+void show_error_dialog(const char*);
+static void handle_input_key_press(Widget, XtPointer, XEvent*, Boolean*);
+static void focus_callback(Widget, XtPointer, XtPointer);
+void clear_chat_callback(Widget, XtPointer, XtPointer);
+void add_message_to_history(dp_message_role_t, const char*, const char*, const char*);
 void free_chat_history();
-void remove_oldest_history_messages(int count_to_remove);
-void *perform_llm_request_thread(void *arg);
-void initialize_dp_context(); // To re-init context after settings change
+void remove_oldest_history_messages(int);
+void *perform_llm_request_thread(void*);
+void initialize_dp_context();
+char* get_config_path(const char*);
+int ensure_config_dir_exists();
+void load_settings();
+void save_settings();
+void attach_image_callback(Widget, XtPointer, XtPointer);
+void file_selection_ok_callback(Widget, XtPointer, XtPointer);
+unsigned char* read_file_to_buffer(const char*, size_t*);
+char* base64_encode(const unsigned char*, size_t);
+static void popup_handler(Widget, XtPointer, XEvent*, Boolean*);
+Widget create_text_popup_menu(Widget);
 
-// Edit menu callbacks
-void cut_callback(Widget w, XtPointer client_data, XtPointer call_data);
-void copy_callback(Widget w, XtPointer client_data, XtPointer call_data);
-void paste_callback(Widget w, XtPointer client_data, XtPointer call_data);
-void select_all_callback(Widget w, XtPointer client_data, XtPointer call_data);
-
-// Settings Dialog callbacks and functions
-void settings_callback(Widget w, XtPointer client_data, XtPointer call_data);
-void settings_tab_change_callback(Widget w, XtPointer client_data, XtPointer call_data);
-void settings_apply_callback(Widget w, XtPointer client_data, XtPointer call_data);
-void settings_ok_callback(Widget w, XtPointer client_data, XtPointer call_data);
-void settings_cancel_callback(Widget w, XtPointer client_data, XtPointer call_data);
-void settings_get_models_callback(Widget w, XtPointer client_data, XtPointer call_data);
-void *perform_get_models_thread(void *arg);
-void settings_use_selected_model_callback(Widget w, XtPointer client_data, XtPointer call_data);
-void populate_settings_dialog();
-void retrieve_settings_from_dialog();
+void cut_callback(Widget, XtPointer, XtPointer); void copy_callback(Widget, XtPointer, XtPointer);
+void paste_callback(Widget, XtPointer, XtPointer); void select_all_callback(Widget, XtPointer, XtPointer);
+void settings_callback(Widget, XtPointer, XtPointer); void settings_tab_change_callback(Widget, XtPointer, XtPointer);
+void settings_apply_callback(Widget, XtPointer, XtPointer); void settings_ok_callback(Widget, XtPointer, XtPointer);
+void settings_cancel_callback(Widget, XtPointer, XtPointer); void settings_get_models_callback(Widget, XtPointer, XtPointer);
+void *perform_get_models_thread(void*); void settings_use_selected_model_callback(Widget, XtPointer, XtPointer);
+void populate_settings_dialog(); void retrieve_settings_from_dialog();
 
 
 void append_to_conversation(const char* text) {
     if (!conversation_text || !XtIsManaged(conversation_text)) return;
-    XmTextPosition current_pos = XmTextGetLastPosition(conversation_text);
-    XmTextInsert(conversation_text, current_pos, (char*)text);
-    current_pos = XmTextGetLastPosition(conversation_text);
-    XmTextShowPosition(conversation_text, current_pos);
+    XmTextPosition pos = XmTextGetLastPosition(conversation_text);
+    XmTextInsert(conversation_text, pos, (char*)text);
+    XmTextShowPosition(conversation_text, XmTextGetLastPosition(conversation_text));
 }
 
 void append_to_assistant_buffer(const char* text) {
     if (!text) return;
-    size_t text_len = strlen(text);
-    if (current_assistant_response_len + text_len + 1 > current_assistant_response_capacity) {
-        current_assistant_response_capacity = (current_assistant_response_len + text_len + 1) * 2;
+    size_t len = strlen(text);
+    if (current_assistant_response_len + len + 1 > current_assistant_response_capacity) {
+        current_assistant_response_capacity = (current_assistant_response_len + len + 1) * 2;
         char *new_buf = realloc(current_assistant_response_buffer, current_assistant_response_capacity);
         if (!new_buf) {
-            perror("Failed to realloc assistant response buffer");
-            free(current_assistant_response_buffer);
+            perror("realloc assistant_buffer"); free(current_assistant_response_buffer);
             current_assistant_response_buffer = NULL; current_assistant_response_len = 0; current_assistant_response_capacity = 0;
             return;
         }
         current_assistant_response_buffer = new_buf;
     }
-    memcpy(current_assistant_response_buffer + current_assistant_response_len, text, text_len);
-    current_assistant_response_len += text_len;
+    memcpy(current_assistant_response_buffer + current_assistant_response_len, text, len);
+    current_assistant_response_len += len;
     current_assistant_response_buffer[current_assistant_response_len] = '\0';
 }
 
-// Writes a structured message to the pipe
 void write_pipe_message(pipe_message_type_t type, const char* data) {
-    pipe_message_t msg;
-    msg.type = type;
-    if (data) {
-        strncpy(msg.data, data, sizeof(msg.data) - 1);
-        msg.data[sizeof(msg.data) - 1] = '\0';
-    } else {
-        msg.data[0] = '\0';
-    }
+    pipe_message_t msg; msg.type = type;
+    if (data) strncpy(msg.data, data, sizeof(msg.data) - 1); else msg.data[0] = '\0';
+    msg.data[sizeof(msg.data) - 1] = '\0';
     if (write(pipe_fds[1], &msg, sizeof(pipe_message_t)) != sizeof(pipe_message_t)) {
-        perror("write_pipe_message: write to pipe failed");
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            perror("write_pipe_message");
+        } else {
+            fprintf(stderr, "write_pipe_message: Pipe is full or temporarily unavailable.\n");
+        }
     }
 }
-
 
 int stream_handler(const char* token, void* user_data, bool is_final, const char* error_during_stream) {
     if (error_during_stream) {
@@ -196,20 +183,19 @@ int stream_handler(const char* token, void* user_data, bool is_final, const char
         current_assistant_response_len = 0;
         return 1;
     }
-
-    if (!assistant_is_replying) {
-        assistant_is_replying = true; prefix_already_added_for_current_reply = false;
+    if (!assistant_is_replying) { // First token of a new reply
+        assistant_is_replying = true;
+        prefix_already_added_for_current_reply = false; // Crucial: reset for the new reply
         if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
         current_assistant_response_len = 0;
     }
-
     if (token) {
         append_to_assistant_buffer(token);
         write_pipe_message(PIPE_MSG_TOKEN, token);
     }
-
     if (is_final) {
         write_pipe_message(PIPE_MSG_STREAM_END, NULL);
+        // assistant_is_replying and prefix_already_added_for_current_reply will be reset by handle_pipe_input
     }
     return 0;
 }
@@ -217,7 +203,6 @@ int stream_handler(const char* token, void* user_data, bool is_final, const char
 void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
     pipe_message_t msg;
     ssize_t nbytes = read(pipe_fds[0], &msg, sizeof(pipe_message_t));
-
     if (nbytes == sizeof(pipe_message_t)) {
         switch (msg.type) {
             case PIPE_MSG_TOKEN:
@@ -228,10 +213,21 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
                 append_to_conversation(msg.data);
                 break;
             case PIPE_MSG_STREAM_END:
-                append_to_conversation("\n");
-                if (current_assistant_response_buffer && current_assistant_response_len > 0) {
-                    add_message_to_history(DP_ROLE_ASSISTANT, current_assistant_response_buffer);
+                // If a prefix was added, or if we were replying and got content, ensure a newline.
+                if (prefix_already_added_for_current_reply || (assistant_is_replying && current_assistant_response_len > 0) ) {
+                    append_to_conversation("\n");
+                } else if (assistant_is_replying && current_assistant_response_len == 0 && !prefix_already_added_for_current_reply) {
+                    // Handle explicitly empty reply: add prefix then newline
+                    append_to_conversation(current_assistant_prefix);
+                    append_to_conversation("\n");
                 }
+
+                if (current_assistant_response_buffer && current_assistant_response_len > 0) {
+                    add_message_to_history(DP_ROLE_ASSISTANT, current_assistant_response_buffer, NULL, NULL);
+                } else if (assistant_is_replying && current_assistant_response_len == 0) {
+                    add_message_to_history(DP_ROLE_ASSISTANT, "", NULL, NULL);
+                }
+
                 if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
                 current_assistant_response_len = 0;
                 assistant_is_replying = false; prefix_already_added_for_current_reply = false;
@@ -241,38 +237,22 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
                 assistant_is_replying = false; prefix_already_added_for_current_reply = false;
                 break;
             case PIPE_MSG_MODEL_LIST_ITEM:
-                // This is for the settings dialog model list
                 if (settings_shell && XtIsManaged(settings_shell)) {
-                    Widget list_to_update = NULL;
-                    if(XmToggleButtonGetState(provider_gemini_rb)) list_to_update = gemini_model_list;
-                    else if(XmToggleButtonGetState(provider_openai_rb)) list_to_update = openai_model_list;
-
+                    Widget list_to_update = XmToggleButtonGetState(provider_gemini_rb) ? gemini_model_list : openai_model_list;
                     if (list_to_update) {
                         XmString item = XmStringCreateLocalized(msg.data);
-                        XmListAddItemUnselected(list_to_update, item, 0);
-                        XmStringFree(item);
+                        XmListAddItemUnselected(list_to_update, item, 0); XmStringFree(item);
                     }
                 }
                 break;
-            case PIPE_MSG_MODEL_LIST_END:
-                // Signal that model listing is complete (e.g., enable/disable UI elements)
-                // For now, just a placeholder.
-                printf("Model listing complete.\n");
-                break;
-            case PIPE_MSG_MODEL_LIST_ERROR:
-                 if (settings_shell && XtIsManaged(settings_shell)) {
-                    show_error_dialog(msg.data); // Show error in settings dialog or main
-                 } else {
-                    show_error_dialog(msg.data);
-                 }
-                break;
-
+            case PIPE_MSG_MODEL_LIST_END: printf("Model listing complete.\n"); break;
+            case PIPE_MSG_MODEL_LIST_ERROR: show_error_dialog(msg.data); break;
         }
     } else if (nbytes == 0) {
         fprintf(stderr, "handle_pipe_input: EOF on pipe.\n"); XtRemoveInput(*id);
-    } else if (nbytes != -1) { // Partial read, should not happen with fixed size struct
+    } else if (nbytes != -1) {
         fprintf(stderr, "handle_pipe_input: Partial read from pipe (%ld bytes).\n", nbytes);
-    } else { // nbytes == -1
+    } else {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             perror("handle_pipe_input: read from pipe"); XtRemoveInput(*id);
         }
@@ -281,47 +261,57 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
 
 void remove_oldest_history_messages(int count_to_remove) {
     if (count_to_remove <= 0 || count_to_remove > chat_history_count) return;
-    for (int i = 0; i < count_to_remove; ++i) {
-        if (chat_history[i].parts) {
-            for (size_t j = 0; j < chat_history[i].num_parts; ++j) {
-                free(chat_history[i].parts[j].text);
-            }
-            free(chat_history[i].parts);
-        }
-    }
+    for (int i = 0; i < count_to_remove; ++i) dp_free_messages(&chat_history[i], 1);
     int remaining_count = chat_history_count - count_to_remove;
-    if (remaining_count > 0) {
-        memmove(chat_history, &chat_history[count_to_remove], remaining_count * sizeof(dp_message_t));
-    }
+    if (remaining_count > 0) memmove(chat_history, &chat_history[count_to_remove], remaining_count * sizeof(dp_message_t));
     chat_history_count = remaining_count;
 }
 
-void add_message_to_history(dp_message_role_t role, const char* text_content) {
-    if (chat_history_count >= MAX_HISTORY_MESSAGES) {
-        int messages_to_remove = (chat_history_count - MAX_HISTORY_MESSAGES) + 2; // Make space for new pair + overflow
-        if (messages_to_remove < 2) messages_to_remove = 2; // Always try to remove a pair if at limit
-        if (chat_history_count < messages_to_remove) messages_to_remove = chat_history_count;
+void add_message_to_history(dp_message_role_t role, const char* text_content, const char* img_mime_type, const char* img_base64_data) {
+    int effective_max_history = history_limits_disabled ? INTERNAL_MAX_HISTORY_CAPACITY : current_max_history_messages;
 
-        printf("Chat history nearly full. Removing %d oldest message(s).\n", messages_to_remove);
-        remove_oldest_history_messages(messages_to_remove);
+    if (chat_history_count >= effective_max_history && effective_max_history > 0) { // Check >0 to avoid issues if limit is 0
+        int messages_to_remove = (chat_history_count - effective_max_history) + 1;
+        if (chat_history_count < messages_to_remove) messages_to_remove = chat_history_count;
+        if (messages_to_remove > 0) {
+             printf("Chat history limit (%d) reached. Removing %d oldest message(s).\n", effective_max_history, messages_to_remove);
+             remove_oldest_history_messages(messages_to_remove);
+        }
     }
 
+    // Ensure capacity, bounded by INTERNAL_MAX_HISTORY_CAPACITY
     if (chat_history_count >= chat_history_capacity) {
         chat_history_capacity = (chat_history_capacity == 0) ? 10 : chat_history_capacity * 2;
-        if (chat_history_capacity > MAX_HISTORY_MESSAGES) chat_history_capacity = MAX_HISTORY_MESSAGES;
-        dp_message_t *new_history = realloc(chat_history, chat_history_capacity * sizeof(dp_message_t));
-        if (!new_history) {
-            perror("Failed to realloc chat history"); return;
+        if (chat_history_capacity > INTERNAL_MAX_HISTORY_CAPACITY) chat_history_capacity = INTERNAL_MAX_HISTORY_CAPACITY;
+        // If still not enough space after bounding, we can't add (should be caught by above check if effective_max_history is also INTERNAL_MAX_HISTORY_CAPACITY)
+        if (chat_history_count >= chat_history_capacity) {
+            fprintf(stderr, "Cannot expand history further due to internal capacity limit.\n");
+            return;
         }
+        dp_message_t *new_history = realloc(chat_history, chat_history_capacity * sizeof(dp_message_t));
+        if (!new_history) { perror("realloc chat_history"); return; }
         chat_history = new_history;
     }
 
     dp_message_t *new_msg = &chat_history[chat_history_count];
     new_msg->role = role; new_msg->num_parts = 0; new_msg->parts = NULL;
-    if (!dp_message_add_text_part(new_msg, text_content)) {
-        fprintf(stderr, "Failed to add text part to history message.\n");
-    } else {
+    Boolean success = True;
+    if ((text_content && strlen(text_content) > 0) || (role == DP_ROLE_ASSISTANT && text_content != NULL) ) {
+        if (!dp_message_add_text_part(new_msg, text_content)) {
+            fprintf(stderr, "Failed to add text part to history.\n"); success = False;
+        }
+    }
+    if (success && img_base64_data && img_mime_type) {
+        if (!dp_message_add_base64_image_part(new_msg, img_mime_type, img_base64_data)) {
+            fprintf(stderr, "Failed to add image part to history.\n"); success = False;
+        }
+    }
+    if (success && new_msg->num_parts > 0) {
         chat_history_count++;
+    } else if (new_msg->parts) {
+        free(new_msg->parts); new_msg->parts = NULL;
+    } else if (!text_content && !img_base64_data && role == DP_ROLE_USER) {
+        return;
     }
 }
 
@@ -336,98 +326,85 @@ void free_chat_history() {
 void *perform_llm_request_thread(void *arg) {
     llm_thread_data_t *thread_data = (llm_thread_data_t *)arg;
     dp_response_t response_status = {0};
-
-    // Critical: The chat_history pointer in thread_data->config.messages
-    // points to the global chat_history. If chat_history can be modified
-    // by the main thread (e.g., clear chat) while this thread is running,
-    // a deep copy of messages would be needed, or a mutex.
-    // For now, assume send_message_callback serializes actual LLM requests.
-    printf("Thread: Performing LLM completion with %d messages.\n", (int)thread_data->config.num_messages);
-
+    printf("Thread: LLM request with %d messages.\n", (int)thread_data->config.num_messages);
     int ret = dp_perform_streaming_completion(dp_ctx, &thread_data->config, stream_handler, NULL, &response_status);
-
     if (ret != 0) {
-        char error_buf[1024];
-        snprintf(error_buf, sizeof(error_buf), "LLM Request Failed (Thread) (HTTP %ld): %s",
+        char err_buf[1024];
+        snprintf(err_buf, sizeof(err_buf), "LLM Request Failed (Thread) (HTTP %ld): %s",
                  response_status.http_status_code,
-                 response_status.error_message ? response_status.error_message : "Unknown Disaster Party error in thread.");
-        write_pipe_message(PIPE_MSG_ERROR, error_buf); // Send error via pipe
+                 response_status.error_message ? response_status.error_message : "DP error in thread.");
+        write_pipe_message(PIPE_MSG_ERROR, err_buf);
     }
-    // If ret == 0, stream_handler would have sent PIPE_MSG_STREAM_END
-
     dp_free_response_content(&response_status);
-    // IMPORTANT: If thread_data->config.messages was a deep copy, it should be freed here.
-    // Since it's pointing to global chat_history, we don't free it here.
-    // The disasterparty library itself does not modify the input messages array.
-    free(thread_data); // Free the llm_thread_data_t struct itself
-    pthread_detach(pthread_self()); // Allow thread resources to be reclaimed
+    free(thread_data);
+    pthread_detach(pthread_self());
     return NULL;
 }
 
-
 void send_message_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     char *input_string_raw = XmTextGetString(input_text);
-    if (!input_string_raw || strlen(input_string_raw) == 0) {
+    if ((!input_string_raw || strlen(input_string_raw) == 0) && !attached_image_base64_data) {
         XtFree(input_string_raw); return;
     }
-    if (input_string_raw[strlen(input_string_raw)-1] == '\n') {
+    if (input_string_raw && input_string_raw[strlen(input_string_raw)-1] == '\n') {
         input_string_raw[strlen(input_string_raw)-1] = '\0';
     }
-    if (strlen(input_string_raw) == 0) {
-        XtFree(input_string_raw); return;
+    if (input_string_raw && strlen(input_string_raw) == 0) {
+        XtFree(input_string_raw); input_string_raw = NULL;
+        if (!attached_image_base64_data) return;
     }
-
-    char display_user_msg[1024];
-    snprintf(display_user_msg, sizeof(display_user_msg), "%s: %s\n", USER_NICKNAME, input_string_raw);
-    append_to_conversation(display_user_msg);
-    add_message_to_history(DP_ROLE_USER, input_string_raw);
+    char display_msg_text_part[1024] = "";
+    if (input_string_raw) {
+         snprintf(display_msg_text_part, sizeof(display_msg_text_part), "%s: %s", USER_NICKNAME, input_string_raw);
+    } else {
+         snprintf(display_msg_text_part, sizeof(display_msg_text_part), "%s: ", USER_NICKNAME);
+    }
+    char full_display_msg[2048]; strcpy(full_display_msg, display_msg_text_part);
+    if (attached_image_base64_data) {
+        char image_indicator[FILENAME_MAX + 50];
+        char path_copy[PATH_MAX]; strncpy(path_copy, attached_image_path, PATH_MAX); path_copy[PATH_MAX-1] = '\0';
+        snprintf(image_indicator, sizeof(image_indicator), " [Image Attached: %s]", basename(path_copy));
+        strcat(full_display_msg, image_indicator);
+    }
+    strcat(full_display_msg, "\n"); append_to_conversation(full_display_msg);
+    add_message_to_history(DP_ROLE_USER, input_string_raw ? input_string_raw : "",
+                           attached_image_base64_data ? attached_image_mime_type : NULL,
+                           attached_image_base64_data);
     XmTextSetString(input_text, "");
-
+    if (input_string_raw) XtFree(input_string_raw);
+    if (attached_image_base64_data) {
+        free(attached_image_base64_data); attached_image_base64_data = NULL;
+        attached_image_path[0] = '\0'; attached_image_mime_type[0] = '\0';
+    }
     if (!dp_ctx) {
-        show_error_dialog("LLM context not initialized. Check Settings.");
-        XtFree(input_string_raw); return;
+        show_error_dialog("LLM context not initialized. Check Settings."); return;
     }
-
     llm_thread_data_t *thread_data = malloc(sizeof(llm_thread_data_t));
-    if (!thread_data) {
-        perror("Failed to allocate thread data");
-        XtFree(input_string_raw); return;
-    }
-
+    if (!thread_data) { perror("malloc llm_thread_data"); return; }
     thread_data->config.model = (current_api_provider == DP_PROVIDER_GOOGLE_GEMINI) ? current_gemini_model : current_openai_model;
-    thread_data->config.temperature = 0.7;
-    thread_data->config.max_tokens = 1024;
+    thread_data->config.temperature = 0.7; thread_data->config.max_tokens = 2048;
     thread_data->config.stream = true;
-    thread_data->config.messages = chat_history; // Pointer to global history
+    thread_data->config.messages = chat_history;
     thread_data->config.num_messages = chat_history_count;
-
-    XtFree(input_string_raw);
-
     snprintf(current_assistant_prefix, sizeof(current_assistant_prefix), "%s: ", ASSISTANT_NICKNAME);
-
     pthread_t tid;
     if (pthread_create(&tid, NULL, perform_llm_request_thread, thread_data) != 0) {
-        perror("Failed to create LLM request thread");
-        free(thread_data);
-        show_error_dialog("Failed to start LLM request.");
+        perror("pthread_create llm_request"); free(thread_data);
+        show_error_dialog("Failed to start LLM request thread.");
     }
 }
 
 void quit_callback(Widget w, XtPointer client_data, XtPointer call_data) {
-    printf("Exiting MotifGPT...\n");
-    free_chat_history();
+    printf("Exiting MotifGPT...\n"); save_settings(); free_chat_history();
     if (current_assistant_response_buffer) free(current_assistant_response_buffer);
-    if (dp_ctx) dp_destroy_context(dp_ctx);
-    curl_global_cleanup();
-    if (pipe_fds[0] != -1) close(pipe_fds[0]);
-    if (pipe_fds[1] != -1) close(pipe_fds[1]);
-    XtDestroyApplicationContext(XtWidgetToApplicationContext(app_shell));
-    exit(0);
+    if (dp_ctx) dp_destroy_context(dp_ctx); curl_global_cleanup();
+    if (pipe_fds[0] != -1) close(pipe_fds[0]); if (pipe_fds[1] != -1) close(pipe_fds[1]);
+    if (settings_shell) XtDestroyWidget(settings_shell);
+    XtDestroyApplicationContext(XtWidgetToApplicationContext(app_shell)); exit(0);
 }
 
 void clear_chat_callback(Widget w, XtPointer client_data, XtPointer call_data) {
-    XmTextSetString(conversation_text, "");
-    free_chat_history();
+    XmTextSetString(conversation_text, ""); free_chat_history();
     append_to_conversation("Chat cleared. Welcome to MotifGPT!\n");
     assistant_is_replying = false; prefix_already_added_for_current_reply = false;
     if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
@@ -487,11 +464,222 @@ void select_all_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     }
 }
 
-// --- Settings Dialog Functions ---
+static void popup_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch) {
+    if (event->type == ButtonPress && event->xbutton.button == 3) {
+        focused_text_widget = w;
+        if (popup_menu) {
+            Boolean editable = XmTextGetEditable(focused_text_widget);
+            XtSetSensitive(popup_cut_item, editable);
+            XtSetSensitive(popup_paste_item, editable);
+            XmMenuPosition(popup_menu, (XButtonPressedEvent*)event);
+            XtManageChild(popup_menu);
+        }
+        *continue_to_dispatch = False;
+    } else {
+        *continue_to_dispatch = True;
+    }
+}
+
+Widget create_text_popup_menu(Widget parent_for_menu_shell) {
+    Widget menu; Widget popup_copy_item, popup_select_all_item, popup_sep_item; XmString label_cs;
+    menu = XmCreatePopupMenu(parent_for_menu_shell, "textPopupMenu", NULL, 0);
+    label_cs = XmStringCreateLocalized("Cut");
+    popup_cut_item = XtVaCreateManagedWidget("popupCut", xmPushButtonWidgetClass, menu, XmNlabelString, label_cs, NULL);
+    XtAddCallback(popup_cut_item, XmNactivateCallback, cut_callback, NULL); XmStringFree(label_cs);
+    label_cs = XmStringCreateLocalized("Copy");
+    popup_copy_item = XtVaCreateManagedWidget("popupCopy", xmPushButtonWidgetClass, menu, XmNlabelString, label_cs, NULL);
+    XtAddCallback(popup_copy_item, XmNactivateCallback, copy_callback, NULL); XmStringFree(label_cs);
+    label_cs = XmStringCreateLocalized("Paste");
+    popup_paste_item = XtVaCreateManagedWidget("popupPaste", xmPushButtonWidgetClass, menu, XmNlabelString, label_cs, NULL);
+    XtAddCallback(popup_paste_item, XmNactivateCallback, paste_callback, NULL); XmStringFree(label_cs);
+    popup_sep_item = XtVaCreateManagedWidget("popupSeparator", xmSeparatorWidgetClass, menu, NULL);
+    label_cs = XmStringCreateLocalized("Select All");
+    popup_select_all_item = XtVaCreateManagedWidget("popupSelectAll", xmPushButtonWidgetClass, menu, XmNlabelString, label_cs, NULL);
+    XtAddCallback(popup_select_all_item, XmNactivateCallback, select_all_callback, NULL); XmStringFree(label_cs);
+    return menu;
+}
+
+char* get_config_path(const char* filename) {
+    static char path[PATH_MAX]; wordexp_t p; char *env_path;
+    if (filename == NULL) filename = "";
+    env_path = getenv("XDG_CONFIG_HOME");
+    if (env_path && env_path[0]) {
+        snprintf(path, sizeof(path), "%s/motifgpt/%s", env_path, filename);
+    } else {
+        env_path = getenv("HOME");
+        if (!env_path || !env_path[0]) {
+            fprintf(stderr, "Error: HOME env var not set.\n"); return NULL;
+        }
+        snprintf(path, sizeof(path), "%s/.config/motifgpt/%s", env_path, filename);
+    }
+    if (path[0] == '~') {
+        if (wordexp(path, &p, 0) == 0) {
+            if (p.we_wordc > 0) strncpy(path, p.we_wordv[0], sizeof(path) - 1);
+            path[sizeof(path) - 1] = '\0'; wordfree(&p);
+        } else { fprintf(stderr, "wordexp failed for path: %s\n", path); }
+    }
+    return path;
+}
+
+int ensure_config_dir_exists() {
+    char *base_dir_path_ptr = get_config_path(""); if (!base_dir_path_ptr) return -1;
+    char base_dir_path[PATH_MAX]; strncpy(base_dir_path, base_dir_path_ptr, PATH_MAX -1); base_dir_path[PATH_MAX-1] = '\0';
+    if (base_dir_path[strlen(base_dir_path)-1] == '/') base_dir_path[strlen(base_dir_path)-1] = '\0';
+    struct stat st = {0};
+    if (stat(base_dir_path, &st) == -1) {
+        if (mkdir(base_dir_path, CONFIG_DIR_MODE) == -1 && errno != EEXIST) {
+            char err_msg[PATH_MAX + 100]; snprintf(err_msg, sizeof(err_msg), "mkdir base config dir: %s", base_dir_path);
+            perror(err_msg); return -1;
+        }
+        printf("Created config directory: %s\n", base_dir_path);
+    }
+    char cache_dir_full_path[PATH_MAX];
+    snprintf(cache_dir_full_path, sizeof(cache_dir_full_path), "%s/%s", base_dir_path, CACHE_DIR_NAME);
+    if (stat(cache_dir_full_path, &st) == -1) {
+        if (mkdir(cache_dir_full_path, CONFIG_DIR_MODE) == -1 && errno != EEXIST) {
+            char err_msg[PATH_MAX + 100]; snprintf(err_msg, sizeof(err_msg), "mkdir cache dir: %s", cache_dir_full_path);
+            perror(err_msg);
+        } else { printf("Created cache directory: %s\n", cache_dir_full_path); }
+    }
+    return 0;
+}
+
+void load_settings() {
+    char *settings_file = get_config_path(CONFIG_FILE_NAME);
+    if (!settings_file) { fprintf(stderr, "Could not determine settings file path.\n"); return; }
+    FILE *fp = fopen(settings_file, "r");
+    if (!fp) {
+        printf("No settings file (%s). Using defaults/environment variables.\n", settings_file);
+        const char* ge = getenv("GEMINI_API_KEY"); if (ge) strncpy(current_gemini_api_key, ge, sizeof(current_gemini_api_key)-1); else current_gemini_api_key[0] = '\0';
+        const char* oe = getenv("OPENAI_API_KEY"); if (oe) strncpy(current_openai_api_key, oe, sizeof(current_openai_api_key)-1); else current_openai_api_key[0] = '\0';
+        current_max_history_messages = DEFAULT_MAX_HISTORY_MESSAGES; // Default if no file
+        history_limits_disabled = False; // Default if no file
+        return;
+    }
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        char *key = strtok(line, "="); char *value = strtok(NULL, "\n");
+        if (key && value) {
+            if (strcmp(key, "provider") == 0) {
+                if (strcmp(value, "gemini") == 0) current_api_provider = DP_PROVIDER_GOOGLE_GEMINI;
+                else if (strcmp(value, "openai") == 0) current_api_provider = DP_PROVIDER_OPENAI_COMPATIBLE;
+            } else if (strcmp(key, "gemini_api_key") == 0) strncpy(current_gemini_api_key, value, sizeof(current_gemini_api_key)-1);
+            else if (strcmp(key, "gemini_model") == 0) strncpy(current_gemini_model, value, sizeof(current_gemini_model)-1);
+            else if (strcmp(key, "openai_api_key") == 0) strncpy(current_openai_api_key, value, sizeof(current_openai_api_key)-1);
+            else if (strcmp(key, "openai_model") == 0) strncpy(current_openai_model, value, sizeof(current_openai_model)-1);
+            else if (strcmp(key, "max_history") == 0) current_max_history_messages = atoi(value);
+            else if (strcmp(key, "history_limits_disabled") == 0) history_limits_disabled = (strcmp(value, "true") == 0);
+        }
+    }
+    fclose(fp); printf("Settings loaded from %s\n", settings_file);
+}
+
+void save_settings() {
+    if (ensure_config_dir_exists() != 0) { fprintf(stderr, "Config dir error. Settings not saved.\n"); return; }
+    char *settings_file = get_config_path(CONFIG_FILE_NAME);
+    if (!settings_file) { fprintf(stderr, "Settings file path error. Not saved.\n"); return; }
+    FILE *fp = fopen(settings_file, "w");
+    if (!fp) {
+        char err_msg[PATH_MAX + 100]; snprintf(err_msg, sizeof(err_msg), "fopen for writing: %s", settings_file);
+        perror(err_msg); return;
+    }
+    fprintf(fp, "provider=%s\n", (current_api_provider == DP_PROVIDER_GOOGLE_GEMINI) ? "gemini" : "openai");
+    fprintf(fp, "gemini_api_key=%s\n", current_gemini_api_key);
+    fprintf(fp, "gemini_model=%s\n", current_gemini_model);
+    fprintf(fp, "openai_api_key=%s\n", current_openai_api_key);
+    fprintf(fp, "openai_model=%s\n", current_openai_model);
+    fprintf(fp, "max_history=%d\n", current_max_history_messages);
+    fprintf(fp, "history_limits_disabled=%s\n", history_limits_disabled ? "true" : "false");
+    fclose(fp); printf("Settings saved to %s\n", settings_file);
+}
+
+void file_selection_ok_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    XmFileSelectionBoxCallbackStruct *cbs = (XmFileSelectionBoxCallbackStruct *)call_data;
+    char *filename = NULL; XmStringGetLtoR(cbs->value, XmFONTLIST_DEFAULT_TAG, &filename);
+    if (!filename || strlen(filename) == 0) { XtFree(filename); return; }
+    strncpy(attached_image_path, filename, PATH_MAX -1); attached_image_path[PATH_MAX-1] = '\0';
+    if (strstr(filename, ".png") || strstr(filename, ".PNG")) strcpy(attached_image_mime_type, "image/png");
+    else if (strstr(filename, ".jpg") || strstr(filename, ".JPG") || strstr(filename, ".jpeg") || strstr(filename, ".JPEG")) strcpy(attached_image_mime_type, "image/jpeg");
+    else if (strstr(filename, ".gif") || strstr(filename, ".GIF")) strcpy(attached_image_mime_type, "image/gif");
+    else { show_error_dialog("Unsupported image type (PNG, JPG, GIF)."); XtFree(filename); attached_image_path[0] = '\0'; return; }
+    size_t file_size; unsigned char *file_buffer = read_file_to_buffer(filename, &file_size); XtFree(filename);
+    if (!file_buffer) { show_error_dialog("Could not read image file."); attached_image_path[0] = '\0'; return; }
+    if (attached_image_base64_data) free(attached_image_base64_data);
+    attached_image_base64_data = base64_encode(file_buffer, file_size); free(file_buffer);
+    if (!attached_image_base64_data) { show_error_dialog("Could not Base64 encode image."); attached_image_path[0] = '\0'; return; }
+    char status_msg[PATH_MAX + 50];
+    char path_copy[PATH_MAX]; strncpy(path_copy, attached_image_path, PATH_MAX); path_copy[PATH_MAX-1] = '\0';
+    snprintf(status_msg, sizeof(status_msg), "[Image ready: %s]", basename(path_copy));
+    append_to_conversation(status_msg); append_to_conversation("\n");
+    XtUnmanageChild(w);
+}
+
+void attach_image_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    static Widget file_selector = NULL;
+    if (!file_selector) {
+        file_selector = XmCreateFileSelectionDialog(app_shell, "fileSelector", NULL, 0);
+        XtAddCallback(file_selector, XmNokCallback, file_selection_ok_callback, NULL);
+        XtAddCallback(file_selector, XmNcancelCallback, (XtCallbackProc)XtUnmanageChild, NULL);
+        XtUnmanageChild(XmFileSelectionBoxGetChild(file_selector, XmDIALOG_HELP_BUTTON));
+    }
+    XtManageChild(file_selector);
+}
+
+char* base64_encode(const unsigned char *data, size_t input_length) {
+    const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t output_length = 4 * ((input_length + 2) / 3);
+    char *encoded_data = malloc(output_length + 1);
+    if (!encoded_data) { perror("malloc base64"); return NULL; }
+    for (size_t i = 0, j = 0; i < input_length;) {
+        uint32_t octet_a = i < input_length ? data[i++] : 0;
+        uint32_t octet_b = i < input_length ? data[i++] : 0;
+        uint32_t octet_c = i < input_length ? data[i++] : 0;
+        uint32_t triple = (octet_a << 0x10) + (octet_b << 0x08) + octet_c;
+        encoded_data[j++] = base64_chars[(triple >> 3 * 6) & 0x3F];
+        encoded_data[j++] = base64_chars[(triple >> 2 * 6) & 0x3F];
+        encoded_data[j++] = base64_chars[(triple >> 1 * 6) & 0x3F];
+        encoded_data[j++] = base64_chars[(triple >> 0 * 6) & 0x3F];
+    }
+    for (size_t i = 0; i < (3 - input_length % 3) % 3; i++) encoded_data[output_length - 1 - i] = '=';
+    encoded_data[output_length] = '\0';
+    return encoded_data;
+}
+
+unsigned char* read_file_to_buffer(const char* filename, size_t* file_size) {
+    FILE* f = fopen(filename, "rb");
+    if (!f) { perror("fopen read_file"); return NULL; }
+    fseek(f, 0, SEEK_END); long size = ftell(f);
+    if (size < 0 || size > 20 * 1024 * 1024) {
+        fclose(f); fprintf(stderr, "File too large (max 20MB) or ftell error.\n"); return NULL;
+    }
+    *file_size = (size_t)size; fseek(f, 0, SEEK_SET);
+    unsigned char* buffer = malloc(*file_size);
+    if (!buffer) { fclose(f); perror("malloc read_file"); return NULL; }
+    if (fread(buffer, 1, *file_size, f) != *file_size) {
+        fclose(f); free(buffer); fprintf(stderr, "fread error.\n"); return NULL;
+    }
+    fclose(f); return buffer;
+}
+
+void initialize_dp_context() {
+    if (dp_ctx) { dp_destroy_context(dp_ctx); dp_ctx = NULL; }
+    const char* key = (current_api_provider == DP_PROVIDER_GOOGLE_GEMINI) ? current_gemini_api_key : current_openai_api_key;
+    const char* model = (current_api_provider == DP_PROVIDER_GOOGLE_GEMINI) ? current_gemini_model : current_openai_model;
+    if (strlen(key) == 0) { fprintf(stderr, "API Key not set. LLM disabled until configured in Settings.\n"); return; }
+    if (strlen(model) == 0) { fprintf(stderr, "Model ID not set. LLM disabled until configured in Settings.\n"); return; }
+    dp_ctx = dp_init_context(current_api_provider, key, NULL);
+    if (!dp_ctx) { fprintf(stderr, "Failed to init LLM context with current settings.\n"); }
+    else { printf("LLM context initialized. Provider: %s, Model: %s\n", (current_api_provider == DP_PROVIDER_GOOGLE_GEMINI ? "Gemini" : "OpenAI"), model); }
+}
+
+void settings_disable_history_limit_toggle_cb(Widget w, XtPointer client_data, XtPointer call_data) {
+    Boolean set = XmToggleButtonGetState(w);
+    XtSetSensitive(history_length_text, !set);
+}
+
 void settings_tab_change_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     long tab_index = (long)client_data;
     if (settings_current_tab_content) XtUnmanageChild(settings_current_tab_content);
-
     switch (tab_index) {
         case 0: settings_current_tab_content = settings_general_tab_content; break;
         case 1: settings_current_tab_content = settings_gemini_tab_content; break;
@@ -502,109 +690,63 @@ void settings_tab_change_callback(Widget w, XtPointer client_data, XtPointer cal
 }
 
 void populate_settings_dialog() {
-    // General Tab
     XmToggleButtonSetState(provider_gemini_rb, current_api_provider == DP_PROVIDER_GOOGLE_GEMINI, False);
     XmToggleButtonSetState(provider_openai_rb, current_api_provider == DP_PROVIDER_OPENAI_COMPATIBLE, False);
 
-    // Gemini Tab
-    XmTextFieldSetString(gemini_api_key_text, current_gemini_api_key);
-    XmTextFieldSetString(gemini_model_text, current_gemini_model);
-    XmListDeleteAllItems(gemini_model_list); // Clear previous items
+    char hist_len_str[10];
+    snprintf(hist_len_str, sizeof(hist_len_str), "%d", current_max_history_messages);
+    XmTextFieldSetString(history_length_text, hist_len_str);
+    XmToggleButtonSetState(disable_history_limit_toggle, history_limits_disabled, False); // Important: use False for notify
+    XtSetSensitive(history_length_text, !history_limits_disabled);
 
-    // OpenAI Tab
+
+    XmTextFieldSetString(gemini_api_key_text, current_gemini_api_key);
+    XmTextFieldSetString(gemini_model_text, current_gemini_model); XmListDeleteAllItems(gemini_model_list);
     XmTextFieldSetString(openai_api_key_text, current_openai_api_key);
-    XmTextFieldSetString(openai_model_text, current_openai_model);
-    XmListDeleteAllItems(openai_model_list); // Clear previous items
+    XmTextFieldSetString(openai_model_text, current_openai_model); XmListDeleteAllItems(openai_model_list);
 }
 
 void retrieve_settings_from_dialog() {
-    // General Tab
     if (XmToggleButtonGetState(provider_gemini_rb)) current_api_provider = DP_PROVIDER_GOOGLE_GEMINI;
     else if (XmToggleButtonGetState(provider_openai_rb)) current_api_provider = DP_PROVIDER_OPENAI_COMPATIBLE;
 
-    // Gemini Tab
-    char *temp_gemini_key = XmTextFieldGetString(gemini_api_key_text);
-    strncpy(current_gemini_api_key, temp_gemini_key, sizeof(current_gemini_api_key) - 1);
-    current_gemini_api_key[sizeof(current_gemini_api_key) - 1] = '\0';
-    XtFree(temp_gemini_key);
+    char *hist_len_str = XmTextFieldGetString(history_length_text);
+    current_max_history_messages = atoi(hist_len_str);
+    if (current_max_history_messages <= 0 && !history_limits_disabled) current_max_history_messages = DEFAULT_MAX_HISTORY_MESSAGES; // Basic validation
+    XtFree(hist_len_str);
+    history_limits_disabled = XmToggleButtonGetState(disable_history_limit_toggle);
 
-    char *temp_gemini_model = XmTextFieldGetString(gemini_model_text);
-    strncpy(current_gemini_model, temp_gemini_model, sizeof(current_gemini_model) - 1);
-    current_gemini_model[sizeof(current_gemini_model) -1] = '\0';
-    XtFree(temp_gemini_model);
 
-    // OpenAI Tab
-    char *temp_openai_key = XmTextFieldGetString(openai_api_key_text);
-    strncpy(current_openai_api_key, temp_openai_key, sizeof(current_openai_api_key) - 1);
-    current_openai_api_key[sizeof(current_openai_api_key) - 1] = '\0';
-    XtFree(temp_openai_key);
-
-    char *temp_openai_model = XmTextFieldGetString(openai_model_text);
-    strncpy(current_openai_model, temp_openai_model, sizeof(current_openai_model) -1);
-    current_openai_model[sizeof(current_openai_model) -1] = '\0';
-    XtFree(temp_openai_model);
+    char *tmp;
+    tmp = XmTextFieldGetString(gemini_api_key_text); strncpy(current_gemini_api_key, tmp, sizeof(current_gemini_api_key)-1); current_gemini_api_key[sizeof(current_gemini_api_key)-1]='\0'; XtFree(tmp);
+    tmp = XmTextFieldGetString(gemini_model_text); strncpy(current_gemini_model, tmp, sizeof(current_gemini_model)-1); current_gemini_model[sizeof(current_gemini_model)-1]='\0'; XtFree(tmp);
+    tmp = XmTextFieldGetString(openai_api_key_text); strncpy(current_openai_api_key, tmp, sizeof(current_openai_api_key)-1); current_openai_api_key[sizeof(current_openai_api_key)-1]='\0'; XtFree(tmp);
+    tmp = XmTextFieldGetString(openai_model_text); strncpy(current_openai_model, tmp, sizeof(current_openai_model)-1); current_openai_model[sizeof(current_openai_model)-1]='\0'; XtFree(tmp);
 }
-
-
-void initialize_dp_context() {
-    if (dp_ctx) {
-        dp_destroy_context(dp_ctx);
-        dp_ctx = NULL;
-    }
-    const char* key_to_use = (current_api_provider == DP_PROVIDER_GOOGLE_GEMINI) ? current_gemini_api_key : current_openai_api_key;
-    if (strlen(key_to_use) == 0) {
-        show_error_dialog("API Key is not set for the selected provider.");
-        return;
-    }
-    dp_ctx = dp_init_context(current_api_provider, key_to_use, NULL);
-    if (!dp_ctx) {
-        show_error_dialog("Failed to initialize LLM context with new settings.");
-    } else {
-        printf("LLM context re-initialized. Provider: %s\n",
-               current_api_provider == DP_PROVIDER_GOOGLE_GEMINI ? "Gemini" : "OpenAI");
-    }
-}
-
 
 void settings_apply_callback(Widget w, XtPointer client_data, XtPointer call_data) {
-    printf("Apply settings callback.\n");
-    retrieve_settings_from_dialog();
-    initialize_dp_context();
-    // Potentially save settings to a file here
+    retrieve_settings_from_dialog(); initialize_dp_context(); save_settings();
 }
 
 void settings_ok_callback(Widget w, XtPointer client_data, XtPointer call_data) {
-    printf("OK settings callback.\n");
-    settings_apply_callback(w, client_data, call_data); // Apply first
-    XtUnmanageChild(settings_shell);
-    // XtDestroyWidget(settings_shell); // Or destroy if not reusing
-    // settings_shell = NULL;
+    settings_apply_callback(w, client_data, call_data); XtUnmanageChild(settings_shell);
 }
 
 void settings_cancel_callback(Widget w, XtPointer client_data, XtPointer call_data) {
-    printf("Cancel settings callback.\n");
     XtUnmanageChild(settings_shell);
-    // XtDestroyWidget(settings_shell);
-    // settings_shell = NULL;
 }
 
 void *perform_get_models_thread(void *arg) {
     get_models_thread_data_t *data = (get_models_thread_data_t *)arg;
     dp_context_t *temp_ctx = dp_init_context(data->provider, data->api_key_for_list, NULL);
     if (!temp_ctx) {
-        write_pipe_message(PIPE_MSG_MODEL_LIST_ERROR, "Failed to create temp context for Get Models.");
-        free(data);
-        pthread_detach(pthread_self());
-        return NULL;
+        write_pipe_message(PIPE_MSG_MODEL_LIST_ERROR, "GetModels: Failed temp context.");
+        free(data); pthread_detach(pthread_self()); return NULL;
     }
-
-    dp_model_list_t *model_list_struct = NULL;
-    int result = dp_list_models(temp_ctx, &model_list_struct);
-
+    dp_model_list_t *model_list_struct = NULL; int result = dp_list_models(temp_ctx, &model_list_struct);
     if (result == 0 && model_list_struct) {
-        if (model_list_struct->error_message) { // Error from API within a 200 OK
-             char err_buf[512];
-             snprintf(err_buf, sizeof(err_buf), "API Error (Get Models): %s", model_list_struct->error_message);
+        if (model_list_struct->error_message) {
+             char err_buf[512]; snprintf(err_buf, sizeof(err_buf), "API Error (Get Models): %s", model_list_struct->error_message);
              write_pipe_message(PIPE_MSG_MODEL_LIST_ERROR, err_buf);
         } else {
             for (size_t i = 0; i < model_list_struct->count; ++i) {
@@ -615,189 +757,112 @@ void *perform_get_models_thread(void *arg) {
         char err_buf[512];
         if (model_list_struct && model_list_struct->error_message) {
              snprintf(err_buf, sizeof(err_buf), "Error Get Models (HTTP %ld): %s", model_list_struct->http_status_code, model_list_struct->error_message);
-        } else if (model_list_struct) {
-            snprintf(err_buf, sizeof(err_buf), "Error Get Models (HTTP %ld): Unknown API error.", model_list_struct->http_status_code);
-        } else {
-            strcpy(err_buf, "Error Get Models: dp_list_models failed critically.");
-        }
+        } else if (model_list_struct) { snprintf(err_buf, sizeof(err_buf), "Error Get Models (HTTP %ld): Unknown API error.", model_list_struct->http_status_code);
+        } else { strcpy(err_buf, "Error Get Models: dp_list_models failed critically."); }
         write_pipe_message(PIPE_MSG_MODEL_LIST_ERROR, err_buf);
     }
-
     write_pipe_message(PIPE_MSG_MODEL_LIST_END, NULL);
-    dp_free_model_list(model_list_struct);
-    dp_destroy_context(temp_ctx);
-    free(data);
-    pthread_detach(pthread_self());
-    return NULL;
+    dp_free_model_list(model_list_struct); dp_destroy_context(temp_ctx);
+    free(data); pthread_detach(pthread_self()); return NULL;
 }
 
-
 void settings_get_models_callback(Widget w, XtPointer client_data, XtPointer call_data) {
-    dp_provider_type_t provider_for_list;
-    char *api_key_for_list_str;
-    Widget list_widget_target;
-
-    long tab_type = (long)client_data; // 0 for Gemini, 1 for OpenAI
-
-    if (tab_type == 0) { // Gemini
-        provider_for_list = DP_PROVIDER_GOOGLE_GEMINI;
-        api_key_for_list_str = XmTextFieldGetString(gemini_api_key_text);
-        list_widget_target = gemini_model_list;
-        XmListDeleteAllItems(gemini_model_list); // Clear before fetching
-    } else { // OpenAI
-        provider_for_list = DP_PROVIDER_OPENAI_COMPATIBLE;
-        api_key_for_list_str = XmTextFieldGetString(openai_api_key_text);
-        list_widget_target = openai_model_list;
-        XmListDeleteAllItems(openai_model_list); // Clear before fetching
-    }
-
-    if (!api_key_for_list_str || strlen(api_key_for_list_str) == 0) {
-        show_error_dialog("API Key is required to fetch models.");
-        XtFree(api_key_for_list_str);
-        return;
-    }
-
+    dp_provider_type_t provider_for_list; char *api_key_str;
+    long tab_type = (long)client_data;
+    if (tab_type == 0) { provider_for_list = DP_PROVIDER_GOOGLE_GEMINI; api_key_str = XmTextFieldGetString(gemini_api_key_text); XmListDeleteAllItems(gemini_model_list); }
+    else { provider_for_list = DP_PROVIDER_OPENAI_COMPATIBLE; api_key_str = XmTextFieldGetString(openai_api_key_text); XmListDeleteAllItems(openai_model_list); }
+    if (!api_key_str || strlen(api_key_str) == 0) { show_error_dialog("API Key required for Get Models."); XtFree(api_key_str); return; }
     get_models_thread_data_t *thread_data = malloc(sizeof(get_models_thread_data_t));
-    if(!thread_data){
-        perror("malloc get_models_thread_data");
-        XtFree(api_key_for_list_str);
-        return;
-    }
+    if(!thread_data){ perror("malloc get_models_thread_data"); XtFree(api_key_str); return; }
     thread_data->provider = provider_for_list;
-    strncpy(thread_data->api_key_for_list, api_key_for_list_str, sizeof(thread_data->api_key_for_list)-1);
-    thread_data->api_key_for_list[sizeof(thread_data->api_key_for_list)-1] = '\0';
-    thread_data->target_list_widget = list_widget_target; // Not used directly by thread, for info
-    XtFree(api_key_for_list_str);
-
+    strncpy(thread_data->api_key_for_list, api_key_str, sizeof(thread_data->api_key_for_list)-1);
+    thread_data->api_key_for_list[sizeof(thread_data->api_key_for_list)-1] = '\0'; XtFree(api_key_str);
     pthread_t tid;
     if (pthread_create(&tid, NULL, perform_get_models_thread, thread_data) != 0) {
-        perror("Failed to create Get Models thread");
-        free(thread_data);
-        show_error_dialog("Failed to start Get Models request.");
+        perror("pthread_create get_models"); free(thread_data); show_error_dialog("Failed to start Get Models thread.");
     }
-    printf("Get Models request initiated for provider %ld.\n", tab_type);
 }
 
 void settings_use_selected_model_callback(Widget w, XtPointer client_data, XtPointer call_data) {
-    long tab_type = (long)client_data; // 0 for Gemini, 1 for OpenAI
-    Widget source_list_widget = (tab_type == 0) ? gemini_model_list : openai_model_list;
-    Widget target_text_widget = (tab_type == 0) ? gemini_model_text : openai_model_text;
-
-    XmString *selected_items;
-    int item_count;
-    XtVaGetValues(source_list_widget, XmNselectedItems, &selected_items, XmNselectedItemCount, &item_count, NULL);
-
+    long tab_type = (long)client_data;
+    Widget source_list = (tab_type == 0) ? gemini_model_list : openai_model_list;
+    Widget target_text = (tab_type == 0) ? gemini_model_text : openai_model_text;
+    XmString *sel_items; int item_count;
+    XtVaGetValues(source_list, XmNselectedItems, &sel_items, XmNselectedItemCount, &item_count, NULL);
     if (item_count > 0) {
-        char *text = NULL;
-        XmStringGetLtoR(selected_items[0], XmFONTLIST_DEFAULT_TAG, &text);
-        if (text) {
-            XmTextFieldSetString(target_text_widget, text);
-            XtFree(text);
-        }
+        char *text = NULL; XmStringGetLtoR(sel_items[0], XmFONTLIST_DEFAULT_TAG, &text);
+        if (text) { XmTextFieldSetString(target_text, text); XtFree(text); }
     }
 }
 
-
 void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     if (settings_shell == NULL) {
-        settings_shell = XtVaCreatePopupShell("settingsShell", topLevelShellWidgetClass, app_shell,
-                                              XmNtitle, "MotifGPT Settings",
-                                              XmNwidth, 500, XmNheight, 450, NULL);
+        settings_shell = XtVaCreatePopupShell("settingsShell", topLevelShellWidgetClass, app_shell, XmNtitle, "MotifGPT Settings", XmNwidth, 500, XmNheight, 500, NULL); // Increased height
         Widget dialog_form = XtVaCreateManagedWidget("dialogForm", xmFormWidgetClass, settings_shell, NULL);
-
-        // --- Tab Buttons ---
-        Widget tab_button_rc = XtVaCreateManagedWidget("tabButtonRc", xmRowColumnWidgetClass, dialog_form,
-                                                       XmNorientation, XmHORIZONTAL,
-                                                       XmNradioBehavior, True, // Makes ToggleButtons act like radio buttons
-                                                       XmNtopAttachment, XmATTACH_FORM, XmNtopOffset, 5,
-                                                       XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, 5,
-                                                       XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5,
-                                                       NULL);
+        Widget tab_button_rc = XtVaCreateManagedWidget("tabButtonRc", xmRowColumnWidgetClass, dialog_form, XmNorientation, XmHORIZONTAL, XmNradioBehavior, True, XmNtopAttachment, XmATTACH_FORM, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, 5, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5, NULL);
         Widget general_tab_btn = XtVaCreateManagedWidget("General", xmToggleButtonWidgetClass, tab_button_rc, XmNindicatorOn, False, NULL);
         Widget gemini_tab_btn = XtVaCreateManagedWidget("Gemini", xmToggleButtonWidgetClass, tab_button_rc, XmNindicatorOn, False, NULL);
         Widget openai_tab_btn = XtVaCreateManagedWidget("OpenAI", xmToggleButtonWidgetClass, tab_button_rc, XmNindicatorOn, False, NULL);
-
         XtAddCallback(general_tab_btn, XmNvalueChangedCallback, settings_tab_change_callback, (XtPointer)0);
         XtAddCallback(gemini_tab_btn, XmNvalueChangedCallback, settings_tab_change_callback, (XtPointer)1);
         XtAddCallback(openai_tab_btn, XmNvalueChangedCallback, settings_tab_change_callback, (XtPointer)2);
-
-        // --- Tab Content Frame ---
-        Widget content_frame = XtVaCreateManagedWidget("contentFrame", xmFrameWidgetClass, dialog_form,
-                                                       XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, tab_button_rc, XmNtopOffset, 5,
-                                                       XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, 5,
-                                                       XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5,
-                                                       XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 45, // Make space for OK/Cancel
-                                                       XmNshadowType, XmSHADOW_ETCHED_IN,
-                                                       NULL);
+        Widget content_frame = XtVaCreateManagedWidget("contentFrame", xmFrameWidgetClass, dialog_form, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, tab_button_rc, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, 5, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 45, XmNshadowType, XmSHADOW_ETCHED_IN, NULL);
 
         // --- General Tab Content ---
         settings_general_tab_content = XtVaCreateWidget("generalTab", xmFormWidgetClass, content_frame, XmNmarginWidth, 10, XmNmarginHeight, 10, NULL);
-        Widget provider_label = XtVaCreateManagedWidget("Provider:", xmLabelWidgetClass, settings_general_tab_content,
-                                                        XmNtopAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, NULL);
+        Widget provider_label = XtVaCreateManagedWidget("Model API Provider:", xmLabelWidgetClass, settings_general_tab_content, XmNtopAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, XmNalignment, XmALIGNMENT_BEGINNING, NULL);
         Widget provider_radio_box = XmCreateRadioBox(settings_general_tab_content, "providerRadioBox", NULL, 0);
-        XtVaSetValues(provider_radio_box, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, provider_label, XmNleftAttachment, XmATTACH_FORM, NULL);
+        XtVaSetValues(provider_radio_box, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, provider_label, XmNleftAttachment, XmATTACH_FORM, XmNorientation, XmHORIZONTAL, NULL);
         provider_gemini_rb = XtVaCreateManagedWidget("Gemini", xmToggleButtonWidgetClass, provider_radio_box, NULL);
         provider_openai_rb = XtVaCreateManagedWidget("OpenAI-compatible", xmToggleButtonWidgetClass, provider_radio_box, NULL);
         XtManageChild(provider_radio_box);
 
+        Widget history_label = XtVaCreateManagedWidget("Message History Length:", xmLabelWidgetClass, settings_general_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, provider_radio_box, XmNtopOffset, 10, XmNleftAttachment, XmATTACH_FORM, XmNalignment, XmALIGNMENT_BEGINNING, NULL);
+        history_length_text = XtVaCreateManagedWidget("historyLength", xmTextFieldWidgetClass, settings_general_tab_content, XmNcolumns, 5, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, provider_radio_box, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_WIDGET, XmNleftWidget, history_label, XmNleftOffset, 5, NULL);
+        disable_history_limit_toggle = XtVaCreateManagedWidget("Disable Message History FIFO Limit", xmToggleButtonWidgetClass, settings_general_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, history_length_text, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, NULL);
+        XtAddCallback(disable_history_limit_toggle, XmNvalueChangedCallback, settings_disable_history_limit_toggle_cb, NULL);
 
-        // --- Gemini Tab Content ---
+
         settings_gemini_tab_content = XtVaCreateWidget("geminiTab", xmFormWidgetClass, content_frame, XmNmarginWidth, 10, XmNmarginHeight, 10, NULL);
         Widget gemini_api_label = XtVaCreateManagedWidget("API Key:", xmLabelWidgetClass, settings_gemini_tab_content, XmNtopAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, NULL);
         gemini_api_key_text = XtVaCreateManagedWidget("geminiApiKey", xmTextFieldWidgetClass, settings_gemini_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, gemini_api_label, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, NULL);
         Widget gemini_model_label = XtVaCreateManagedWidget("Model ID:", xmLabelWidgetClass, settings_gemini_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, gemini_api_key_text, XmNleftAttachment, XmATTACH_FORM, NULL);
         gemini_model_text = XtVaCreateManagedWidget("geminiModel", xmTextFieldWidgetClass, settings_gemini_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, gemini_model_label, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, NULL);
         Widget gemini_get_models_btn = XtVaCreateManagedWidget("Get Models", xmPushButtonWidgetClass, settings_gemini_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, gemini_model_text, XmNleftAttachment, XmATTACH_FORM, NULL);
-        XtAddCallback(gemini_get_models_btn, XmNactivateCallback, settings_get_models_callback, (XtPointer)0); // 0 for Gemini
+        XtAddCallback(gemini_get_models_btn, XmNactivateCallback, settings_get_models_callback, (XtPointer)0);
         gemini_model_list = XmCreateScrolledList(settings_gemini_tab_content, "geminiModelList", NULL, 0);
-        XtVaSetValues(XtParent(gemini_model_list), XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, gemini_get_models_btn, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 35,NULL); // Space for "Use" button
+        XtVaSetValues(XtParent(gemini_model_list), XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, gemini_get_models_btn, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 35,NULL);
         XtManageChild(gemini_model_list);
         Widget gemini_use_model_btn = XtVaCreateManagedWidget("Use Selected", xmPushButtonWidgetClass, settings_gemini_tab_content, XmNbottomAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, NULL);
         XtAddCallback(gemini_use_model_btn, XmNactivateCallback, settings_use_selected_model_callback, (XtPointer)0);
 
-
-        // --- OpenAI Tab Content (similar to Gemini) ---
         settings_openai_tab_content = XtVaCreateWidget("openaiTab", xmFormWidgetClass, content_frame, XmNmarginWidth, 10, XmNmarginHeight, 10, NULL);
         Widget openai_api_label = XtVaCreateManagedWidget("API Key:", xmLabelWidgetClass, settings_openai_tab_content, XmNtopAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, NULL);
         openai_api_key_text = XtVaCreateManagedWidget("openaiApiKey", xmTextFieldWidgetClass, settings_openai_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_api_label, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, NULL);
         Widget openai_model_label = XtVaCreateManagedWidget("Model ID:", xmLabelWidgetClass, settings_openai_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_api_key_text, XmNleftAttachment, XmATTACH_FORM, NULL);
         openai_model_text = XtVaCreateManagedWidget("openaiModel", xmTextFieldWidgetClass, settings_openai_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_model_label, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, NULL);
         Widget openai_get_models_btn = XtVaCreateManagedWidget("Get Models", xmPushButtonWidgetClass, settings_openai_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_model_text, XmNleftAttachment, XmATTACH_FORM, NULL);
-        XtAddCallback(openai_get_models_btn, XmNactivateCallback, settings_get_models_callback, (XtPointer)1); // 1 for OpenAI
+        XtAddCallback(openai_get_models_btn, XmNactivateCallback, settings_get_models_callback, (XtPointer)1);
         openai_model_list = XmCreateScrolledList(settings_openai_tab_content, "openaiModelList", NULL, 0);
         XtVaSetValues(XtParent(openai_model_list), XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_get_models_btn, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 35, NULL);
         XtManageChild(openai_model_list);
         Widget openai_use_model_btn = XtVaCreateManagedWidget("Use Selected", xmPushButtonWidgetClass, settings_openai_tab_content, XmNbottomAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, NULL);
         XtAddCallback(openai_use_model_btn, XmNactivateCallback, settings_use_selected_model_callback, (XtPointer)1);
 
-
-        // --- Dialog Buttons (OK, Apply, Cancel) ---
-        Widget button_rc = XtVaCreateManagedWidget("dialogButtonRc", xmRowColumnWidgetClass, dialog_form,
-                                                   XmNorientation, XmHORIZONTAL, XmNpacking, XmPACK_COLUMN,
-                                                   XmNnumColumns, 3, // For OK, Apply, Cancel
-                                                   XmNentryAlignment, XmALIGNMENT_CENTER,
-                                                   XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 5,
-                                                   XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, 5,
-                                                   XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5,
-                                                   NULL);
+        Widget button_rc = XtVaCreateManagedWidget("dialogButtonRc", xmRowColumnWidgetClass, dialog_form, XmNorientation, XmHORIZONTAL, XmNpacking, XmPACK_COLUMN, XmNnumColumns, 3, XmNentryAlignment, XmALIGNMENT_CENTER, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, 5, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5, NULL);
         Widget ok_button = XtVaCreateManagedWidget("OK", xmPushButtonWidgetClass, button_rc, NULL);
         Widget apply_button = XtVaCreateManagedWidget("Apply", xmPushButtonWidgetClass, button_rc, NULL);
         Widget cancel_button = XtVaCreateManagedWidget("Cancel", xmPushButtonWidgetClass, button_rc, NULL);
-
         XtAddCallback(ok_button, XmNactivateCallback, settings_ok_callback, NULL);
         XtAddCallback(apply_button, XmNactivateCallback, settings_apply_callback, NULL);
         XtAddCallback(cancel_button, XmNactivateCallback, settings_cancel_callback, NULL);
-
-        // Set initial tab
-        XmToggleButtonSetState(general_tab_btn, True, True); // This will trigger its callback
+        XmToggleButtonSetState(general_tab_btn, True, True);
     }
-    populate_settings_dialog(); // Populate with current settings
+    populate_settings_dialog();
     XtManageChild(settings_shell);
     XtPopup(settings_shell, XtGrabNone);
 }
 
-
-// --- Main Application Setup ---
 int main(int argc, char **argv) {
     XtAppContext app_context;
     Widget main_window, menu_bar, main_form;
@@ -807,139 +872,91 @@ int main(int argc, char **argv) {
     Widget cut_button, copy_button, paste_button, select_all_button, edit_sep;
     XmString acc_text_ctrl_q, acc_text_ctrl_o, acc_text_ctrl_x, acc_text_ctrl_c, acc_text_ctrl_v, acc_text_ctrl_a;
 
+    if (ensure_config_dir_exists() != 0) {
+        fprintf(stderr, "Warning: Could not create/access config directory. Settings may not persist.\n");
+    }
+    load_settings();
+
     current_assistant_response_capacity = 1024;
     current_assistant_response_buffer = malloc(current_assistant_response_capacity);
-    if (!current_assistant_response_buffer) {
-        perror("Failed to allocate initial assistant response buffer"); return 1;
-    }
+    if (!current_assistant_response_buffer) { perror("malloc assistant_buffer"); return 1; }
     current_assistant_response_buffer[0] = '\0';
 
-    if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) {
-        fprintf(stderr, "Fatal: Failed to initialize libcurl.\n"); return 1;
-    }
-
-    // Initialize API key from environment or use default empty
-    // User will set it in settings dialog.
-    const char* gemini_env_key = getenv("GEMINI_API_KEY");
-    if (gemini_env_key) strncpy(current_gemini_api_key, gemini_env_key, sizeof(current_gemini_api_key)-1);
-    const char* openai_env_key = getenv("OPENAI_API_KEY");
-    if (openai_env_key) strncpy(current_openai_api_key, openai_env_key, sizeof(current_openai_api_key)-1);
-
-    initialize_dp_context(); // Initial context based on defaults/env
-
+    if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) { fprintf(stderr, "Fatal: curl_global_init failed.\n"); return 1; }
+    initialize_dp_context();
 
     if (pipe(pipe_fds) == -1) {
-        perror("Fatal: pipe creation failed");
+        perror("Fatal: pipe failed");
         if(dp_ctx) dp_destroy_context(dp_ctx); curl_global_cleanup(); return 1;
     }
     if (fcntl(pipe_fds[0], F_SETFL, O_NONBLOCK) == -1) {
-        perror("Fatal: fcntl O_NONBLOCK failed");
-        close(pipe_fds[0]); close(pipe_fds[1]);
+        perror("Fatal: fcntl failed"); close(pipe_fds[0]); close(pipe_fds[1]);
         if(dp_ctx) dp_destroy_context(dp_ctx); curl_global_cleanup(); return 1;
     }
 
     app_shell = XtAppInitialize(&app_context, "MotifGPT", NULL, 0, &argc, argv, NULL, NULL, 0);
     XtAddCallback(app_shell, XmNdestroyCallback, quit_callback, NULL);
-    main_window = XmCreateMainWindow(app_shell, "mainWindow", NULL, 0);
-    XtManageChild(main_window);
-
-    menu_bar = XmCreateMenuBar(main_window, "menuBar", NULL, 0);
-    XtManageChild(menu_bar);
+    main_window = XmCreateMainWindow(app_shell, "mainWindow", NULL, 0); XtManageChild(main_window);
+    menu_bar = XmCreateMenuBar(main_window, "menuBar", NULL, 0); XtManageChild(menu_bar);
 
     file_menu = XmCreatePulldownMenu(menu_bar, "fileMenu", NULL, 0);
-    file_cascade = XtVaCreateManagedWidget("File", xmCascadeButtonWidgetClass, menu_bar,
-                                           XmNsubMenuId, file_menu, XmNmnemonic, XK_F, NULL);
+    file_cascade = XtVaCreateManagedWidget("File", xmCascadeButtonWidgetClass, menu_bar, XmNsubMenuId, file_menu, XmNmnemonic, XK_F, NULL);
     acc_text_ctrl_o = XmStringCreateLocalized("Ctrl+O");
-    settings_button = XtVaCreateManagedWidget("Settings...", xmPushButtonWidgetClass, file_menu,
-                                           XmNmnemonic, XK_S, XmNaccelerator, "Ctrl<Key>o",
-                                           XmNacceleratorText, acc_text_ctrl_o, NULL);
-    XmStringFree(acc_text_ctrl_o);
-    XtAddCallback(settings_button, XmNactivateCallback, settings_callback, NULL);
-
-    clear_chat_button = XtVaCreateManagedWidget("Clear Chat", xmPushButtonWidgetClass, file_menu,
-                                           XmNmnemonic, XK_C, NULL);
+    settings_button = XtVaCreateManagedWidget("Settings...", xmPushButtonWidgetClass, file_menu, XmNmnemonic, XK_S, XmNaccelerator, "Ctrl<Key>o", XmNacceleratorText, acc_text_ctrl_o, NULL);
+    XmStringFree(acc_text_ctrl_o); XtAddCallback(settings_button, XmNactivateCallback, settings_callback, NULL);
+    clear_chat_button = XtVaCreateManagedWidget("Clear Chat", xmPushButtonWidgetClass, file_menu, XmNmnemonic, XK_C, NULL);
     XtAddCallback(clear_chat_button, XmNactivateCallback, clear_chat_callback, NULL);
     file_sep_exit = XtVaCreateManagedWidget("fileSeparatorExit", xmSeparatorWidgetClass, file_menu, NULL);
     acc_text_ctrl_q = XmStringCreateLocalized("Ctrl+Q");
-    quit_button_widget = XtVaCreateManagedWidget("Exit", xmPushButtonWidgetClass, file_menu,
-                                           XmNmnemonic, XK_x, XmNaccelerator, "Ctrl<Key>q",
-                                           XmNacceleratorText, acc_text_ctrl_q, NULL);
-    XmStringFree(acc_text_ctrl_q);
-    XtAddCallback(quit_button_widget, XmNactivateCallback, quit_callback, NULL);
+    quit_button_widget = XtVaCreateManagedWidget("Exit", xmPushButtonWidgetClass, file_menu, XmNmnemonic, XK_x, XmNaccelerator, "Ctrl<Key>q", XmNacceleratorText, acc_text_ctrl_q, NULL);
+    XmStringFree(acc_text_ctrl_q); XtAddCallback(quit_button_widget, XmNactivateCallback, quit_callback, NULL);
 
     edit_menu = XmCreatePulldownMenu(menu_bar, "editMenu", NULL, 0);
-    edit_cascade = XtVaCreateManagedWidget("Edit", xmCascadeButtonWidgetClass, menu_bar,
-                                           XmNsubMenuId, edit_menu, XmNmnemonic, XK_E, NULL);
+    edit_cascade = XtVaCreateManagedWidget("Edit", xmCascadeButtonWidgetClass, menu_bar, XmNsubMenuId, edit_menu, XmNmnemonic, XK_E, NULL);
     acc_text_ctrl_x = XmStringCreateLocalized("Ctrl+X");
-    cut_button = XtVaCreateManagedWidget("Cut", xmPushButtonWidgetClass, edit_menu,
-                                         XmNmnemonic, XK_t, XmNaccelerator, "Ctrl<Key>x",
-                                         XmNacceleratorText, acc_text_ctrl_x, NULL);
-    XmStringFree(acc_text_ctrl_x);
-    XtAddCallback(cut_button, XmNactivateCallback, cut_callback, NULL);
+    cut_button = XtVaCreateManagedWidget("Cut", xmPushButtonWidgetClass, edit_menu, XmNmnemonic, XK_t, XmNaccelerator, "Ctrl<Key>x", XmNacceleratorText, acc_text_ctrl_x, NULL);
+    XmStringFree(acc_text_ctrl_x); XtAddCallback(cut_button, XmNactivateCallback, cut_callback, NULL);
     acc_text_ctrl_c = XmStringCreateLocalized("Ctrl+C");
-    copy_button = XtVaCreateManagedWidget("Copy", xmPushButtonWidgetClass, edit_menu,
-                                          XmNmnemonic, XK_C, XmNaccelerator, "Ctrl<Key>c",
-                                          XmNacceleratorText, acc_text_ctrl_c, NULL);
-    XmStringFree(acc_text_ctrl_c);
-    XtAddCallback(copy_button, XmNactivateCallback, copy_callback, NULL);
+    copy_button = XtVaCreateManagedWidget("Copy", xmPushButtonWidgetClass, edit_menu, XmNmnemonic, XK_C, XmNaccelerator, "Ctrl<Key>c", XmNacceleratorText, acc_text_ctrl_c, NULL);
+    XmStringFree(acc_text_ctrl_c); XtAddCallback(copy_button, XmNactivateCallback, copy_callback, NULL);
     acc_text_ctrl_v = XmStringCreateLocalized("Ctrl+V");
-    paste_button = XtVaCreateManagedWidget("Paste", xmPushButtonWidgetClass, edit_menu,
-                                           XmNmnemonic, XK_P, XmNaccelerator, "Ctrl<Key>v",
-                                           XmNacceleratorText, acc_text_ctrl_v, NULL);
-    XmStringFree(acc_text_ctrl_v);
-    XtAddCallback(paste_button, XmNactivateCallback, paste_callback, NULL);
+    paste_button = XtVaCreateManagedWidget("Paste", xmPushButtonWidgetClass, edit_menu, XmNmnemonic, XK_P, XmNaccelerator, "Ctrl<Key>v", XmNacceleratorText, acc_text_ctrl_v, NULL);
+    XmStringFree(acc_text_ctrl_v); XtAddCallback(paste_button, XmNactivateCallback, paste_callback, NULL);
     edit_sep = XtVaCreateManagedWidget("editSeparator", xmSeparatorWidgetClass, edit_menu, NULL);
     acc_text_ctrl_a = XmStringCreateLocalized("Ctrl+A");
-    select_all_button = XtVaCreateManagedWidget("Select All", xmPushButtonWidgetClass, edit_menu,
-                                                XmNmnemonic, XK_A, XmNaccelerator, "Ctrl<Key>a",
-                                                XmNacceleratorText, acc_text_ctrl_a, NULL);
-    XmStringFree(acc_text_ctrl_a);
-    XtAddCallback(select_all_button, XmNactivateCallback, select_all_callback, NULL);
+    select_all_button = XtVaCreateManagedWidget("Select All", xmPushButtonWidgetClass, edit_menu, XmNmnemonic, XK_A, XmNaccelerator, "Ctrl<Key>a", XmNacceleratorText, acc_text_ctrl_a, NULL);
+    XmStringFree(acc_text_ctrl_a); XtAddCallback(select_all_button, XmNactivateCallback, select_all_callback, NULL);
 
-    main_form = XtVaCreateWidget("mainForm", xmFormWidgetClass, main_window, XmNwidth, 600, XmNheight, 450, NULL);
-    XtManageChild(main_form);
-
-    chat_area_paned = XtVaCreateManagedWidget("chatAreaPaned", xmPanedWindowWidgetClass, main_form,
-                                              XmNtopAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM,
-                                              XmNleftAttachment, XmATTACH_FORM,
-                                              XmNrightAttachment, XmATTACH_FORM, XmNsashWidth, 1, XmNsashHeight, 1, NULL);
+    main_form = XtVaCreateWidget("mainForm", xmFormWidgetClass, main_window, XmNwidth, 600, XmNheight, 450, NULL); XtManageChild(main_form);
+    chat_area_paned = XtVaCreateManagedWidget("chatAreaPaned", xmPanedWindowWidgetClass, main_form, XmNtopAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNsashWidth, 1, XmNsashHeight, 1, NULL);
     Widget scrolled_conv_win = XmCreateScrolledWindow(chat_area_paned, "scrolledConvWin", NULL, 0);
     XtVaSetValues(scrolled_conv_win, XmNpaneMinimum, 100, XmNpaneMaximum, 1000, NULL);
     conversation_text = XmCreateText(scrolled_conv_win, "conversationText", NULL, 0);
-    XtVaSetValues(conversation_text, XmNeditMode, XmMULTI_LINE_EDIT, XmNeditable, False,
-                  XmNcursorPositionVisible, False, XmNwordWrap, True, XmNscrollHorizontal, False, XmNrows, 15,
-                  XmNbackground, WhitePixelOfScreen(XtScreen(conversation_text)), NULL);
-    XtManageChild(conversation_text);
-    XtManageChild(scrolled_conv_win);
+    XtVaSetValues(conversation_text, XmNeditMode, XmMULTI_LINE_EDIT, XmNeditable, False, XmNcursorPositionVisible, False, XmNwordWrap, True, XmNscrollHorizontal, False, XmNrows, 15, XmNbackground, WhitePixelOfScreen(XtScreen(conversation_text)), NULL);
+    XtManageChild(conversation_text); XtManageChild(scrolled_conv_win);
     XmScrolledWindowSetAreas(scrolled_conv_win, NULL, NULL, conversation_text);
     XtAddCallback(conversation_text, XmNfocusCallback, focus_callback, NULL);
+    XtAddEventHandler(conversation_text, ButtonPressMask, False, popup_handler, NULL);
 
-    input_form = XtVaCreateWidget("inputForm", xmFormWidgetClass, chat_area_paned,
-                                   XmNpaneMinimum, 100, XmNpaneMaximum, 200, XmNfractionBase, 10, NULL);
-    XtManageChild(input_form);
-    bottom_buttons_form = XtVaCreateManagedWidget("bottomButtonsForm", xmFormWidgetClass, input_form,
-                                                 XmNbottomAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM,
-                                                 XmNrightAttachment, XmATTACH_FORM, XmNheight, 30,
-                                                 NULL);
-    send_button = XtVaCreateManagedWidget("Send", xmPushButtonWidgetClass, bottom_buttons_form,
-                                          XmNrightAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM,
-                                          XmNbottomAttachment, XmATTACH_FORM, XmNtopAttachment, XmATTACH_FORM,
-                                          XmNdefaultButtonShadowThickness, 1, NULL);
+    input_form = XtVaCreateWidget("inputForm", xmFormWidgetClass, chat_area_paned, XmNpaneMinimum, 120, XmNpaneMaximum, 250, XmNfractionBase, 10, NULL); XtManageChild(input_form);
+    bottom_buttons_form = XtVaCreateManagedWidget("bottomButtonsForm", xmFormWidgetClass, input_form, XmNbottomAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNheight, 35, NULL);
+    attach_image_button = XtVaCreateManagedWidget("Attach Image...", xmPushButtonWidgetClass, bottom_buttons_form, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, 5, XmNtopAttachment, XmATTACH_FORM, XmNtopOffset, 2, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 2, NULL);
+    XtAddCallback(attach_image_button, XmNactivateCallback, attach_image_callback, NULL);
+    send_button = XtVaCreateManagedWidget("Send", xmPushButtonWidgetClass, bottom_buttons_form, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5, XmNleftAttachment, XmATTACH_WIDGET, XmNleftWidget, attach_image_button, XmNleftOffset, 5, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 2, XmNtopAttachment, XmATTACH_FORM, XmNtopOffset, 2, XmNdefaultButtonShadowThickness, 1, NULL);
     XtAddCallback(send_button, XmNactivateCallback, send_message_callback, NULL);
     XtVaSetValues(input_form, XmNdefaultButton, send_button, NULL);
 
     Widget scrolled_input_win = XmCreateScrolledWindow(input_form, "scrolledInputWin", NULL, 0);
-    XtVaSetValues(scrolled_input_win, XmNtopAttachment, XmATTACH_FORM,
-                  XmNbottomAttachment, XmATTACH_WIDGET, XmNbottomWidget, bottom_buttons_form,
-                  XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, NULL);
+    XtVaSetValues(scrolled_input_win, XmNtopAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_WIDGET, XmNbottomWidget, bottom_buttons_form, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, NULL);
     input_text = XmCreateText(scrolled_input_win, "inputText", NULL, 0);
-    XtVaSetValues(input_text, XmNeditMode, XmMULTI_LINE_EDIT, XmNrows, 3, XmNwordWrap, True,
-                  XmNbackground, WhitePixelOfScreen(XtScreen(input_text)), NULL);
-    XtManageChild(input_text);
-    XtManageChild(scrolled_input_win);
+    XtVaSetValues(input_text, XmNeditMode, XmMULTI_LINE_EDIT, XmNrows, 3, XmNwordWrap, True, XmNbackground, WhitePixelOfScreen(XtScreen(input_text)), NULL);
+    XtManageChild(input_text); XtManageChild(scrolled_input_win);
     XmScrolledWindowSetAreas(scrolled_input_win, NULL, NULL, input_text);
     XtAddEventHandler(input_text, KeyPressMask, False, handle_input_key_press, NULL);
     XtAddCallback(input_text, XmNfocusCallback, focus_callback, NULL);
+    XtAddEventHandler(input_text, ButtonPressMask, False, popup_handler, NULL);
+
+    popup_menu = create_text_popup_menu(main_window);
 
     XmMainWindowSetAreas(main_window, menu_bar, NULL, NULL, NULL, main_form);
     XtAppAddInput(app_context, pipe_fds[0], (XtPointer)XtInputReadMask, handle_pipe_input, NULL);
@@ -952,8 +969,8 @@ int main(int argc, char **argv) {
     free_chat_history();
     if (dp_ctx) dp_destroy_context(dp_ctx);
     curl_global_cleanup();
-    if (pipe_fds[0] != -1) close(pipe_fds[0]);
-    if (pipe_fds[1] != -1) close(pipe_fds[1]);
+    if (pipe_fds[0] != -1) close(pipe_fds[0]); if (pipe_fds[1] != -1) close(pipe_fds[1]);
+    if (settings_shell) XtDestroyWidget(settings_shell);
     return 0;
 }
 
