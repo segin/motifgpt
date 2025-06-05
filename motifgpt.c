@@ -38,6 +38,7 @@
 #include <wordexp.h>
 #include <limits.h>
 #include <ctype.h>
+#include <locale.h> // For setlocale
 
 #include "disasterparty.h"
 #include <curl/curl.h>
@@ -155,6 +156,8 @@ void settings_disable_history_limit_toggle_cb(Widget, XtPointer, XtPointer);
 static void openai_base_url_focus_in_cb(Widget, XtPointer, XtPointer);
 static void openai_base_url_focus_out_cb(Widget, XtPointer, XtPointer);
 
+// ALL FUNCTION DEFINITIONS START HERE
+// (Restored from previous full version - motifgpt.c)
 
 void append_to_conversation(const char* text) {
     if (!conversation_text || !XtIsManaged(conversation_text)) return;
@@ -346,7 +349,7 @@ void *perform_llm_request_thread(void *arg) {
     }
     dp_free_response_content(&response_status);
     free(thread_data);
-    pthread_detach(pthread_self());
+    pthread_detach(pthread_self()); // Detach after freeing thread_data
     return NULL;
 }
 
@@ -407,6 +410,8 @@ void send_message_callback(Widget w, XtPointer client_data, XtPointer call_data)
         perror("pthread_create llm_request"); free(thread_data);
         show_error_dialog("Failed to start LLM request thread.");
     }
+    // Detach immediately after creation if we don't plan to join
+    // pthread_detach(tid); // This was moved to the thread itself for self-cleanup
 }
 
 void quit_callback(Widget w, XtPointer client_data, XtPointer call_data) {
@@ -429,7 +434,7 @@ void clear_chat_callback(Widget w, XtPointer client_data, XtPointer call_data) {
 void show_error_dialog(const char* message) {
     Widget parent = (settings_shell && XtIsManaged(settings_shell)) ? settings_shell : app_shell;
     Widget dialog = XmCreateErrorDialog(parent, "errorDialog", NULL, 0);
-    XmString xm_msg = XmStringCreateLocalized((char*)message);
+    XmString xm_msg = XmStringCreateLocalized((char*)message); // Cast for XmStringCreateLocalized
     XtVaSetValues(dialog, XmNmessageString, xm_msg, NULL); XmStringFree(xm_msg);
     XtUnmanageChild(XmMessageBoxGetChild(dialog, XmDIALOG_CANCEL_BUTTON));
     XtUnmanageChild(XmMessageBoxGetChild(dialog, XmDIALOG_HELP_BUTTON));
@@ -470,10 +475,11 @@ static void app_text_key_press_handler(Widget w, XtPointer client_data, XEvent *
     if (event->type == KeyPress) {
         XKeyEvent *key_event = (XKeyEvent *)event;
         KeySym keysym;
+        // Modifiers modifiers; // Not strictly needed if checking event->xkey.state directly
         char buffer[10]; XLookupString(key_event, buffer, sizeof(buffer)-1, &keysym, NULL);
 
         if (key_event->state & ControlMask) {
-            if (keysym == XK_Return || keysym == XK_KP_Enter) {
+            if (keysym == XK_Return || keysym == XK_KP_Enter) { // Let input_text_key_press_handler handle Ctrl+Enter for input_text
                  *continue_to_dispatch = True;
                  return;
             }
@@ -503,8 +509,11 @@ static void app_text_key_press_handler(Widget w, XtPointer client_data, XEvent *
 
 static void focus_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     XmAnyCallbackStruct *focus_data = (XmAnyCallbackStruct *)call_data;
+    // const char* placeholder_text = (const char*) client_data; // Not used by this general focus_callback
+
     if (focus_data->reason == XmCR_FOCUS) {
         focused_text_widget = w;
+        // Specific placeholder handling is now done by separate focus_in/out callbacks for those fields
     }
 }
 
@@ -536,7 +545,6 @@ static void settings_text_field_focus_out_cb(Widget w, XtPointer client_data, Xt
         XtVaSetValues(w, XmNforeground, normal_fg_color, NULL);
     }
     XtFree(current_text);
-    // No need to call general focus_callback on losing focus unless specifically required
 }
 
 
@@ -829,37 +837,35 @@ void initialize_dp_context() {
     Boolean key_is_placeholder = False;
     Boolean model_is_placeholder = False;
 
-    if (settings_shell) {
+    // Check if current values are placeholders, considering if settings dialog exists
+    if (settings_shell) { // Only check against widget state if dialog is created
         Pixel fg;
         if (current_api_provider == DP_PROVIDER_GOOGLE_GEMINI) {
-            if(gemini_api_key_text && XtIsManaged(gemini_api_key_text)) { // Check if widget is valid
+            if(gemini_api_key_text) {
                 XtVaGetValues(gemini_api_key_text, XmNforeground, &fg, NULL);
                 if (strcmp(key_to_use, DEFAULT_GEMINI_KEY_PLACEHOLDER) == 0 && fg == grey_fg_color) key_is_placeholder = True;
-            } else if (strcmp(key_to_use, DEFAULT_GEMINI_KEY_PLACEHOLDER) == 0) key_is_placeholder = True; // Fallback if widget not ready
-
-            if(gemini_model_text && XtIsManaged(gemini_model_text)) {
+            }
+            if(gemini_model_text) {
                 XtVaGetValues(gemini_model_text, XmNforeground, &fg, NULL);
                 if (strcmp(model_to_use, DEFAULT_GEMINI_MODEL) == 0 && fg == grey_fg_color) model_is_placeholder = True;
-            } else if (strcmp(model_to_use, DEFAULT_GEMINI_MODEL) == 0) model_is_placeholder = True;
-
+            }
         } else { // OpenAI
-            if(openai_api_key_text && XtIsManaged(openai_api_key_text)) {
+            if(openai_api_key_text) {
                 XtVaGetValues(openai_api_key_text, XmNforeground, &fg, NULL);
                 if (strcmp(key_to_use, DEFAULT_OPENAI_KEY_PLACEHOLDER) == 0 && fg == grey_fg_color) key_is_placeholder = True;
-            } else if (strcmp(key_to_use, DEFAULT_OPENAI_KEY_PLACEHOLDER) == 0) key_is_placeholder = True;
-
-            if(openai_model_text && XtIsManaged(openai_model_text)) {
+            }
+            if(openai_model_text){
                 XtVaGetValues(openai_model_text, XmNforeground, &fg, NULL);
                 if (strcmp(model_to_use, DEFAULT_OPENAI_MODEL) == 0 && fg == grey_fg_color) model_is_placeholder = True;
-            } else if (strcmp(model_to_use, DEFAULT_OPENAI_MODEL) == 0) model_is_placeholder = True;
+            }
         }
-    } else { // Fallback if settings_shell not created yet (initial load)
+    } else { // Fallback to string comparison if dialog not created (e.g., initial load)
         if (current_api_provider == DP_PROVIDER_GOOGLE_GEMINI) {
             if (strcmp(key_to_use, DEFAULT_GEMINI_KEY_PLACEHOLDER) == 0) key_is_placeholder = True;
-            if (strcmp(model_to_use, DEFAULT_GEMINI_MODEL) == 0) model_is_placeholder = True;
+            if (strcmp(model_to_use, DEFAULT_GEMINI_MODEL) == 0 && strlen(key_to_use) == 0) model_is_placeholder = True; // Model is placeholder if key is also empty
         } else {
             if (strcmp(key_to_use, DEFAULT_OPENAI_KEY_PLACEHOLDER) == 0) key_is_placeholder = True;
-            if (strcmp(model_to_use, DEFAULT_OPENAI_MODEL) == 0) model_is_placeholder = True;
+            if (strcmp(model_to_use, DEFAULT_OPENAI_MODEL) == 0 && strlen(key_to_use) == 0) model_is_placeholder = True;
         }
     }
 
@@ -909,7 +915,6 @@ void populate_settings_dialog() {
     XmToggleButtonSetState(enter_sends_message_toggle, enter_key_sends_message, False);
     XtSetSensitive(history_length_text, !history_limits_disabled);
 
-    // Gemini
     if (strlen(current_gemini_api_key) == 0) {
         XmTextFieldSetString(gemini_api_key_text, DEFAULT_GEMINI_KEY_PLACEHOLDER);
         XtVaSetValues(gemini_api_key_text, XmNforeground, grey_fg_color, NULL);
@@ -926,7 +931,6 @@ void populate_settings_dialog() {
     }
     XmListDeleteAllItems(gemini_model_list);
 
-    // OpenAI
     if (strlen(current_openai_api_key) == 0) {
         XmTextFieldSetString(openai_api_key_text, DEFAULT_OPENAI_KEY_PLACEHOLDER);
         XtVaSetValues(openai_api_key_text, XmNforeground, grey_fg_color, NULL);
@@ -1218,6 +1222,12 @@ int main(int argc, char **argv) {
     Widget cut_button, copy_button, paste_button, select_all_button, edit_sep;
     XmString acc_text_ctrl_q, acc_text_ctrl_o, acc_text_ctrl_x, acc_text_ctrl_c, acc_text_ctrl_v, acc_text_ctrl_a;
 
+    // Set locale for UTF-8 handling *before* XtAppInitialize
+    if (setlocale(LC_ALL, "") == NULL) {
+        fprintf(stderr, "Warning: Could not set locale.\n");
+    }
+
+
     if (ensure_config_dir_exists() != 0) {
         fprintf(stderr, "Warning: Could not create/access config directory. Settings may not persist.\n");
     }
@@ -1295,11 +1305,17 @@ int main(int argc, char **argv) {
 
     main_form = XtVaCreateWidget("mainForm", xmFormWidgetClass, main_window, XmNwidth, 600, XmNheight, 450, NULL); XtManageChild(main_form);
     chat_area_paned = XtVaCreateManagedWidget("chatAreaPaned", xmPanedWindowWidgetClass, main_form, XmNtopAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNsashWidth, 1, XmNsashHeight, 1, NULL);
-    Widget scrolled_conv_win = XmCreateScrolledWindow(chat_area_paned, "scrolledConvWin", NULL, 0);
-    XtVaSetValues(scrolled_conv_win, XmNpaneMinimum, 100, XmNpaneMaximum, 1000, XmNscrollingPolicy, XmAUTOMATIC, NULL);
+
+    Arg sw_args[5]; int sw_ac = 0;
+    XtSetArg(sw_args[sw_ac], XmNpaneMinimum, 100); sw_ac++;
+    XtSetArg(sw_args[sw_ac], XmNpaneMaximum, 1000); sw_ac++;
+    XtSetArg(sw_args[sw_ac], XmNscrollingPolicy, XmAUTOMATIC); sw_ac++;
+    Widget scrolled_conv_win = XmCreateScrolledWindow(chat_area_paned, "scrolledConvWin", sw_args, sw_ac);
+    XtManageChild(scrolled_conv_win);
+
     conversation_text = XmCreateText(scrolled_conv_win, "conversationText", NULL, 0);
     XtVaSetValues(conversation_text, XmNeditMode, XmMULTI_LINE_EDIT, XmNeditable, False, XmNcursorPositionVisible, False, XmNwordWrap, True, XmNscrollHorizontal, False, XmNrows, 15, XmNbackground, WhitePixelOfScreen(XtScreen(conversation_text)), XmNresizeWidth, False, NULL);
-    XtManageChild(conversation_text); XtManageChild(scrolled_conv_win);
+    XtManageChild(conversation_text);
     XmScrolledWindowSetAreas(scrolled_conv_win, NULL, NULL, conversation_text);
     XtAddCallback(conversation_text, XmNfocusCallback, focus_callback, NULL);
     XtAddEventHandler(conversation_text, ButtonPressMask, False, popup_handler, NULL);
@@ -1314,11 +1330,15 @@ int main(int argc, char **argv) {
     XtAddCallback(send_button, XmNactivateCallback, send_message_callback, NULL);
     XtVaSetValues(input_form, XmNdefaultButton, send_button, NULL);
 
-    Widget scrolled_input_win = XmCreateScrolledWindow(input_form, "scrolledInputWin", NULL, 0);
-    XtVaSetValues(scrolled_input_win, XmNtopAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_WIDGET, XmNbottomWidget, bottom_buttons_form, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNscrollingPolicy, XmAUTOMATIC, NULL);
+    sw_ac = 0;
+    XtSetArg(sw_args[sw_ac], XmNscrollingPolicy, XmAUTOMATIC); sw_ac++;
+    Widget scrolled_input_win = XmCreateScrolledWindow(input_form, "scrolledInputWin", sw_args, sw_ac);
+    XtVaSetValues(scrolled_input_win, XmNtopAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_WIDGET, XmNbottomWidget, bottom_buttons_form, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, NULL);
+    XtManageChild(scrolled_input_win);
+
     input_text = XmCreateText(scrolled_input_win, "inputText", NULL, 0);
     XtVaSetValues(input_text, XmNeditMode, XmMULTI_LINE_EDIT, XmNrows, 3, XmNwordWrap, True, XmNbackground, WhitePixelOfScreen(XtScreen(input_text)), XmNresizeWidth, False, NULL);
-    XtManageChild(input_text); XtManageChild(scrolled_input_win);
+    XtManageChild(input_text);
     XmScrolledWindowSetAreas(scrolled_input_win, NULL, NULL, input_text);
     XtAddEventHandler(input_text, KeyPressMask, False, input_text_key_press_handler, NULL);
     XtAddEventHandler(input_text, KeyPressMask, True, app_text_key_press_handler, NULL);
