@@ -44,8 +44,8 @@
 
 // --- Configuration ---
 #define DEFAULT_PROVIDER DP_PROVIDER_GOOGLE_GEMINI
-#define DEFAULT_GEMINI_MODEL "gemini-2.0-flash" // Standardized
-#define DEFAULT_OPENAI_MODEL "gpt-4.1-nano"   // Standardized
+#define DEFAULT_GEMINI_MODEL "gemini-2.0-flash"
+#define DEFAULT_OPENAI_MODEL "gpt-4.1-nano"
 #define DEFAULT_OPENAI_BASE_URL "https://api.openai.com/v1"
 #define DEFAULT_GEMINI_KEY_PLACEHOLDER "AIkeygoesherexxx..."
 #define DEFAULT_OPENAI_KEY_PLACEHOLDER "sk-yourkeygoesherexxxx..."
@@ -80,9 +80,9 @@ Widget enter_sends_message_toggle;
 
 dp_provider_type_t current_api_provider = DEFAULT_PROVIDER;
 char current_gemini_api_key[256] = "";
-char current_gemini_model[128] = DEFAULT_GEMINI_MODEL; // Use define
+char current_gemini_model[128] = DEFAULT_GEMINI_MODEL;
 char current_openai_api_key[256] = "";
-char current_openai_model[128] = DEFAULT_OPENAI_MODEL; // Use define
+char current_openai_model[128] = DEFAULT_OPENAI_MODEL;
 char current_openai_base_url[256] = "";
 int current_max_history_messages = DEFAULT_MAX_HISTORY_MESSAGES;
 Boolean history_limits_disabled = False;
@@ -473,25 +473,25 @@ static void app_text_key_press_handler(Widget w, XtPointer client_data, XEvent *
         char buffer[10]; XLookupString(key_event, buffer, sizeof(buffer)-1, &keysym, NULL);
 
         if (key_event->state & ControlMask) {
-            if (keysym == XK_Return || keysym == XK_KP_Enter) { // Let input_text_key_press_handler handle Ctrl+Enter for input_text
+            if (keysym == XK_Return || keysym == XK_KP_Enter) {
                  *continue_to_dispatch = True;
                  return;
             }
             switch (keysym) {
                 case XK_x: case XK_X:
-                    if (focused_text_widget && XmIsText(focused_text_widget) && XmTextGetEditable(focused_text_widget))
+                    if (focused_text_widget && (XmIsText(focused_text_widget) || XmIsTextField(focused_text_widget)) && XmTextGetEditable(focused_text_widget))
                         XmTextCut(focused_text_widget, XtLastTimestampProcessed(XtDisplay(focused_text_widget)));
                     *continue_to_dispatch = False; break;
                 case XK_c: case XK_C:
-                    if (focused_text_widget && XmIsText(focused_text_widget))
+                    if (focused_text_widget && (XmIsText(focused_text_widget) || XmIsTextField(focused_text_widget)))
                         XmTextCopy(focused_text_widget, XtLastTimestampProcessed(XtDisplay(focused_text_widget)));
                     *continue_to_dispatch = False; break;
                 case XK_v: case XK_V:
-                    if (focused_text_widget && XmIsText(focused_text_widget) && XmTextGetEditable(focused_text_widget))
+                    if (focused_text_widget && (XmIsText(focused_text_widget) || XmIsTextField(focused_text_widget)) && XmTextGetEditable(focused_text_widget))
                         XmTextPaste(focused_text_widget);
                     *continue_to_dispatch = False; break;
                 case XK_a: case XK_A:
-                    if (focused_text_widget && XmIsText(focused_text_widget))
+                    if (focused_text_widget && (XmIsText(focused_text_widget) || XmIsTextField(focused_text_widget)))
                         XmTextSetSelection(focused_text_widget, 0, XmTextGetLastPosition(focused_text_widget), CurrentTime);
                     *continue_to_dispatch = False; break;
                 default: *continue_to_dispatch = True; break;
@@ -503,35 +503,50 @@ static void app_text_key_press_handler(Widget w, XtPointer client_data, XEvent *
 
 static void focus_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     XmAnyCallbackStruct *focus_data = (XmAnyCallbackStruct *)call_data;
-    const char* placeholder_text = (const char*) client_data;
-
     if (focus_data->reason == XmCR_FOCUS) {
         focused_text_widget = w;
-        if (placeholder_text && (XmIsTextField(w) || XmIsText(w)) ) { // Check if it's a text input widget
-            char *current_text = XmIsTextField(w) ? XmTextFieldGetString(w) : XmTextGetString(w);
-            if (current_text && strcmp(current_text, placeholder_text) == 0) {
-                Pixel current_fg;
-                XtVaGetValues(w, XmNforeground, &current_fg, NULL);
-                if (current_fg == grey_fg_color) {
-                    if(XmIsTextField(w)) XmTextFieldSetString(w, ""); else XmTextSetString(w,"");
-                    XtVaSetValues(w, XmNforeground, normal_fg_color, NULL);
-                }
-            }
-            XtFree(current_text);
-        }
-    } else if (focus_data->reason == XmCR_LOSING_FOCUS) {
-         if (placeholder_text && (XmIsTextField(w) || XmIsText(w)) ) {
-            char *current_text = XmIsTextField(w) ? XmTextFieldGetString(w) : XmTextGetString(w);
-            if (current_text && strlen(current_text) == 0) {
-                if(XmIsTextField(w)) XmTextFieldSetString(w, placeholder_text); else XmTextSetString(w, placeholder_text);
-                XtVaSetValues(w, XmNforeground, grey_fg_color, NULL);
-            } else if (current_text && strcmp(current_text, placeholder_text) != 0) {
-                XtVaSetValues(w, XmNforeground, normal_fg_color, NULL);
-            }
-            XtFree(current_text);
-        }
     }
 }
+
+// Specific focus IN callback for settings text fields with placeholders
+static void settings_text_field_focus_in_cb(Widget w, XtPointer client_data, XtPointer call_data) {
+    const char* placeholder = (const char*) client_data;
+    char *current_text = XmTextFieldGetString(w);
+    if (current_text && placeholder && strcmp(current_text, placeholder) == 0) {
+        Pixel current_fg;
+        XtVaGetValues(w, XmNforeground, &current_fg, NULL);
+        if (current_fg == grey_fg_color) {
+            XmTextFieldSetString(w, "");
+            XtVaSetValues(w, XmNforeground, normal_fg_color, NULL);
+        }
+    }
+    XtFree(current_text);
+    focus_callback(w, NULL, call_data); // Call general focus handler too
+}
+
+// Specific focus OUT callback for settings text fields with placeholders
+static void settings_text_field_focus_out_cb(Widget w, XtPointer client_data, XtPointer call_data) {
+    const char* placeholder = (const char*) client_data;
+    char *current_text = XmTextFieldGetString(w);
+    if (current_text && placeholder && strlen(current_text) == 0) { // Field is empty
+        XmTextFieldSetString(w, (char*)placeholder); // Cast placeholder
+        XtVaSetValues(w, XmNforeground, grey_fg_color, NULL);
+    } else if (current_text && placeholder && strcmp(current_text, placeholder) != 0) {
+        // User typed something else, ensure normal color
+        XtVaSetValues(w, XmNforeground, normal_fg_color, NULL);
+    }
+    XtFree(current_text);
+    // No need to call general focus_callback on losing focus unless specifically required
+}
+
+
+static void openai_base_url_focus_in_cb(Widget w, XtPointer client_data, XtPointer call_data) {
+    settings_text_field_focus_in_cb(w, (XtPointer)DEFAULT_OPENAI_BASE_URL, call_data);
+}
+static void openai_base_url_focus_out_cb(Widget w, XtPointer client_data, XtPointer call_data) {
+    settings_text_field_focus_out_cb(w, (XtPointer)DEFAULT_OPENAI_BASE_URL, call_data);
+}
+
 
 void cut_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     if (focused_text_widget && XtIsManaged(focused_text_widget) && (XmIsText(focused_text_widget) || XmIsTextField(focused_text_widget)) && XmTextGetEditable(focused_text_widget)) {
@@ -577,21 +592,57 @@ static void popup_handler(Widget w, XtPointer client_data, XEvent *event, Boolea
 }
 
 Widget create_text_popup_menu(Widget parent_for_menu_shell) {
-    Widget menu, popup_sep_item; XmString label_cs;
+    Widget menu;
+    XmString label_cs, accel_cs;
+
     menu = XmCreatePopupMenu(parent_for_menu_shell, "textPopupMenu", NULL, 0);
+
     label_cs = XmStringCreateLocalized("Cut");
-    popup_cut_item = XtVaCreateManagedWidget("popupCut", xmPushButtonWidgetClass, menu, XmNlabelString, label_cs, NULL);
-    XtAddCallback(popup_cut_item, XmNactivateCallback, cut_callback, NULL); XmStringFree(label_cs);
+    accel_cs = XmStringCreateLocalized("Ctrl+X");
+    popup_cut_item = XtVaCreateManagedWidget("popupCut", xmPushButtonWidgetClass, menu,
+                                             XmNlabelString, label_cs,
+                                             XmNmnemonic, XK_t,
+                                             XmNaccelerator, "Ctrl<Key>x",
+                                             XmNacceleratorText, accel_cs,
+                                             NULL);
+    XtAddCallback(popup_cut_item, XmNactivateCallback, cut_callback, NULL);
+    XmStringFree(label_cs); XmStringFree(accel_cs);
+
     label_cs = XmStringCreateLocalized("Copy");
-    popup_copy_item = XtVaCreateManagedWidget("popupCopy", xmPushButtonWidgetClass, menu, XmNlabelString, label_cs, NULL);
-    XtAddCallback(popup_copy_item, XmNactivateCallback, copy_callback, NULL); XmStringFree(label_cs);
+    accel_cs = XmStringCreateLocalized("Ctrl+C");
+    popup_copy_item = XtVaCreateManagedWidget("popupCopy", xmPushButtonWidgetClass, menu,
+                                              XmNlabelString, label_cs,
+                                              XmNmnemonic, XK_C,
+                                              XmNaccelerator, "Ctrl<Key>c",
+                                              XmNacceleratorText, accel_cs,
+                                              NULL);
+    XtAddCallback(popup_copy_item, XmNactivateCallback, copy_callback, NULL);
+    XmStringFree(label_cs); XmStringFree(accel_cs);
+
     label_cs = XmStringCreateLocalized("Paste");
-    popup_paste_item = XtVaCreateManagedWidget("popupPaste", xmPushButtonWidgetClass, menu, XmNlabelString, label_cs, NULL);
-    XtAddCallback(popup_paste_item, XmNactivateCallback, paste_callback, NULL); XmStringFree(label_cs);
-    popup_sep_item = XtVaCreateManagedWidget("popupSeparator", xmSeparatorWidgetClass, menu, NULL);
+    accel_cs = XmStringCreateLocalized("Ctrl+V");
+    popup_paste_item = XtVaCreateManagedWidget("popupPaste", xmPushButtonWidgetClass, menu,
+                                               XmNlabelString, label_cs,
+                                               XmNmnemonic, XK_P,
+                                               XmNaccelerator, "Ctrl<Key>v",
+                                               XmNacceleratorText, accel_cs,
+                                               NULL);
+    XtAddCallback(popup_paste_item, XmNactivateCallback, paste_callback, NULL);
+    XmStringFree(label_cs); XmStringFree(accel_cs);
+
+    XtVaCreateManagedWidget("popupSeparator", xmSeparatorWidgetClass, menu, NULL);
+
     label_cs = XmStringCreateLocalized("Select All");
-    popup_select_all_item = XtVaCreateManagedWidget("popupSelectAll", xmPushButtonWidgetClass, menu, XmNlabelString, label_cs, NULL);
-    XtAddCallback(popup_select_all_item, XmNactivateCallback, select_all_callback, NULL); XmStringFree(label_cs);
+    accel_cs = XmStringCreateLocalized("Ctrl+A");
+    popup_select_all_item = XtVaCreateManagedWidget("popupSelectAll", xmPushButtonWidgetClass, menu,
+                                                    XmNlabelString, label_cs,
+                                                    XmNmnemonic, XK_A,
+                                                    XmNaccelerator, "Ctrl<Key>a",
+                                                    XmNacceleratorText, accel_cs,
+                                                    NULL);
+    XtAddCallback(popup_select_all_item, XmNactivateCallback, select_all_callback, NULL);
+    XmStringFree(label_cs); XmStringFree(accel_cs);
+
     return menu;
 }
 
@@ -736,11 +787,11 @@ char* base64_encode(const unsigned char *data, size_t input_length) {
         uint32_t octet_a = i < input_length ? data[i++] : 0;
         uint32_t octet_b = i < input_length ? data[i++] : 0;
         uint32_t octet_c = i < input_length ? data[i++] : 0;
-        uint32_t triple = (octet_a << 0x10) + (octet_b << 0x08) + octet_c;
-        encoded_data[j++] = base64_chars[(triple >> 3 * 6) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 2 * 6) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 1 * 6) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 0 * 6) & 0x3F];
+        uint32_t triple = (octet_a << 16) + (octet_b << 8) + octet_c;
+        encoded_data[j++] = base64_chars[(triple >> 18) & 0x3F];
+        encoded_data[j++] = base64_chars[(triple >> 12) & 0x3F];
+        encoded_data[j++] = base64_chars[(triple >> 6) & 0x3F];
+        encoded_data[j++] = base64_chars[(triple >> 0) & 0x3F];
     }
     for (size_t i = 0; i < (3 - input_length % 3) % 3; i++) encoded_data[output_length - 1 - i] = '=';
     encoded_data[output_length] = '\0';
@@ -771,28 +822,52 @@ void initialize_dp_context() {
 
     if (current_api_provider == DP_PROVIDER_OPENAI_COMPATIBLE) {
         if (strlen(current_openai_base_url) > 0 && strcmp(current_openai_base_url, DEFAULT_OPENAI_BASE_URL) != 0) {
-             // Only use custom base URL if it's not empty and not the placeholder
-            Pixel current_fg_val; // Use a temporary variable for XtVaGetValues
-            Boolean color_checked = False;
-            if (openai_base_url_text && XtIsManaged(openai_base_url_text)) { // Check if widget exists and is managed
-                 XtVaGetValues(openai_base_url_text, XmNforeground, &current_fg_val, NULL);
-                 color_checked = True;
-            }
-            if (!color_checked || current_fg_val != grey_fg_color) { // Not the placeholder or widget not available to check
-                base_url_to_use = current_openai_base_url;
-            }
+            base_url_to_use = current_openai_base_url;
+        }
+    }
+
+    Boolean key_is_placeholder = False;
+    Boolean model_is_placeholder = False;
+
+    if (settings_shell) {
+        Pixel fg;
+        if (current_api_provider == DP_PROVIDER_GOOGLE_GEMINI) {
+            if(gemini_api_key_text && XtIsManaged(gemini_api_key_text)) { // Check if widget is valid
+                XtVaGetValues(gemini_api_key_text, XmNforeground, &fg, NULL);
+                if (strcmp(key_to_use, DEFAULT_GEMINI_KEY_PLACEHOLDER) == 0 && fg == grey_fg_color) key_is_placeholder = True;
+            } else if (strcmp(key_to_use, DEFAULT_GEMINI_KEY_PLACEHOLDER) == 0) key_is_placeholder = True; // Fallback if widget not ready
+
+            if(gemini_model_text && XtIsManaged(gemini_model_text)) {
+                XtVaGetValues(gemini_model_text, XmNforeground, &fg, NULL);
+                if (strcmp(model_to_use, DEFAULT_GEMINI_MODEL) == 0 && fg == grey_fg_color) model_is_placeholder = True;
+            } else if (strcmp(model_to_use, DEFAULT_GEMINI_MODEL) == 0) model_is_placeholder = True;
+
+        } else { // OpenAI
+            if(openai_api_key_text && XtIsManaged(openai_api_key_text)) {
+                XtVaGetValues(openai_api_key_text, XmNforeground, &fg, NULL);
+                if (strcmp(key_to_use, DEFAULT_OPENAI_KEY_PLACEHOLDER) == 0 && fg == grey_fg_color) key_is_placeholder = True;
+            } else if (strcmp(key_to_use, DEFAULT_OPENAI_KEY_PLACEHOLDER) == 0) key_is_placeholder = True;
+
+            if(openai_model_text && XtIsManaged(openai_model_text)) {
+                XtVaGetValues(openai_model_text, XmNforeground, &fg, NULL);
+                if (strcmp(model_to_use, DEFAULT_OPENAI_MODEL) == 0 && fg == grey_fg_color) model_is_placeholder = True;
+            } else if (strcmp(model_to_use, DEFAULT_OPENAI_MODEL) == 0) model_is_placeholder = True;
+        }
+    } else { // Fallback if settings_shell not created yet (initial load)
+        if (current_api_provider == DP_PROVIDER_GOOGLE_GEMINI) {
+            if (strcmp(key_to_use, DEFAULT_GEMINI_KEY_PLACEHOLDER) == 0) key_is_placeholder = True;
+            if (strcmp(model_to_use, DEFAULT_GEMINI_MODEL) == 0) model_is_placeholder = True;
+        } else {
+            if (strcmp(key_to_use, DEFAULT_OPENAI_KEY_PLACEHOLDER) == 0) key_is_placeholder = True;
+            if (strcmp(model_to_use, DEFAULT_OPENAI_MODEL) == 0) model_is_placeholder = True;
         }
     }
 
 
-    if (strlen(key_to_use) == 0 ||
-        (current_api_provider == DP_PROVIDER_GOOGLE_GEMINI && strcmp(key_to_use, DEFAULT_GEMINI_KEY_PLACEHOLDER)==0 && XtIsManaged(gemini_api_key_text) && XtVaAppGetPixel(XtDisplay(gemini_api_key_text), XmNforeground) == grey_fg_color ) ||
-        (current_api_provider == DP_PROVIDER_OPENAI_COMPATIBLE && strcmp(key_to_use, DEFAULT_OPENAI_KEY_PLACEHOLDER)==0 && XtIsManaged(openai_api_key_text) && XtVaAppGetPixel(XtDisplay(openai_api_key_text), XmNforeground) == grey_fg_color) ) {
+    if (strlen(key_to_use) == 0 || key_is_placeholder) {
         fprintf(stderr, "API Key not set or is placeholder. LLM disabled until configured in Settings.\n"); return;
     }
-    if (strlen(model_to_use) == 0 ||
-        (current_api_provider == DP_PROVIDER_GOOGLE_GEMINI && strcmp(model_to_use, DEFAULT_GEMINI_MODEL)==0 && XtIsManaged(gemini_model_text) && XtVaAppGetPixel(XtDisplay(gemini_model_text), XmNforeground) == grey_fg_color) ||
-        (current_api_provider == DP_PROVIDER_OPENAI_COMPATIBLE && strcmp(model_to_use, DEFAULT_OPENAI_MODEL)==0 && XtIsManaged(openai_model_text) && XtVaAppGetPixel(XtDisplay(openai_model_text), XmNforeground) == grey_fg_color) ) {
+    if (strlen(model_to_use) == 0 || model_is_placeholder) {
          fprintf(stderr, "Model ID not set or is placeholder. LLM disabled until configured in Settings.\n"); return;
     }
 
@@ -822,33 +897,6 @@ void settings_tab_change_callback(Widget w, XtPointer client_data, XtPointer cal
     }
     if (settings_current_tab_content) XtManageChild(settings_current_tab_content);
 }
-
-static void settings_text_field_focus_in_cb(Widget w, XtPointer client_data, XtPointer call_data) {
-    const char* placeholder = (const char*) client_data;
-    char *current_text = XmTextFieldGetString(w);
-    if (current_text && placeholder && strcmp(current_text, placeholder) == 0) {
-        Pixel current_fg;
-        XtVaGetValues(w, XmNforeground, &current_fg, NULL);
-        if (current_fg == grey_fg_color) {
-            XmTextFieldSetString(w, "");
-            XtVaSetValues(w, XmNforeground, normal_fg_color, NULL);
-        }
-    }
-    XtFree(current_text);
-}
-
-static void settings_text_field_focus_out_cb(Widget w, XtPointer client_data, XtPointer call_data) {
-    const char* placeholder = (const char*) client_data;
-    char *current_text = XmTextFieldGetString(w);
-    if (current_text && placeholder && strlen(current_text) == 0) {
-        XmTextFieldSetString(w, placeholder);
-        XtVaSetValues(w, XmNforeground, grey_fg_color, NULL);
-    } else if (current_text && placeholder && strcmp(current_text, placeholder) != 0) {
-        XtVaSetValues(w, XmNforeground, normal_fg_color, NULL);
-    }
-    XtFree(current_text);
-}
-
 
 void populate_settings_dialog() {
     XmToggleButtonSetState(provider_gemini_rb, current_api_provider == DP_PROVIDER_GOOGLE_GEMINI, False);
@@ -914,10 +962,8 @@ void retrieve_settings_from_dialog() {
     history_limits_disabled = XmToggleButtonGetState(disable_history_limit_toggle);
     enter_key_sends_message = XmToggleButtonGetState(enter_sends_message_toggle);
 
-    char *tmp;
-    Pixel fg_color;
+    char *tmp; Pixel fg_color;
 
-    // Gemini
     tmp = XmTextFieldGetString(gemini_api_key_text);
     XtVaGetValues(gemini_api_key_text, XmNforeground, &fg_color, NULL);
     if (strcmp(tmp, DEFAULT_GEMINI_KEY_PLACEHOLDER) == 0 && fg_color == grey_fg_color) current_gemini_api_key[0] = '\0';
@@ -929,7 +975,6 @@ void retrieve_settings_from_dialog() {
     else { strncpy(current_gemini_model, tmp, sizeof(current_gemini_model)-1); current_gemini_model[sizeof(current_gemini_model)-1]='\0';}
     XtFree(tmp);
 
-    // OpenAI
     tmp = XmTextFieldGetString(openai_api_key_text);
     XtVaGetValues(openai_api_key_text, XmNforeground, &fg_color, NULL);
     if (strcmp(tmp, DEFAULT_OPENAI_KEY_PLACEHOLDER) == 0 && fg_color == grey_fg_color) current_openai_api_key[0] = '\0';
@@ -1045,7 +1090,6 @@ void settings_use_selected_model_callback(Widget w, XtPointer client_data, XtPoi
         char *text = NULL; XmStringGetLtoR(sel_items[0], XmFONTLIST_DEFAULT_TAG, &text);
         if (text) {
              XmTextFieldSetString(target_text, text);
-             // Ensure foreground is normal after setting from list
              XtVaSetValues(target_text, XmNforeground, normal_fg_color, NULL);
              XtFree(text);
         }
@@ -1091,7 +1135,7 @@ void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
         XtAddCallback(history_length_text, XmNmodifyVerifyCallback, numeric_verify_cb, NULL);
         XtAddEventHandler(history_length_text, KeyPressMask, False, app_text_key_press_handler, NULL);
         XtAddEventHandler(history_length_text, ButtonPressMask, False, popup_handler, NULL);
-        XtAddCallback(history_length_text, XmNfocusCallback, focus_callback, NULL); // General focus
+        XtAddCallback(history_length_text, XmNfocusCallback, focus_callback, NULL);
         disable_history_limit_toggle = XtVaCreateManagedWidget("Disable Message History FIFO Limit", xmToggleButtonWidgetClass, settings_general_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, history_length_text, XmNtopOffset, 10, XmNleftAttachment, XmATTACH_FORM, NULL);
         XtAddCallback(disable_history_limit_toggle, XmNvalueChangedCallback, settings_disable_history_limit_toggle_cb, NULL);
         enter_sends_message_toggle = XtVaCreateManagedWidget("Enter key sends message (unchecked) / inserts newline (checked)", xmToggleButtonWidgetClass, settings_general_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, disable_history_limit_toggle, XmNtopOffset, 10, XmNleftAttachment, XmATTACH_FORM, NULL);
