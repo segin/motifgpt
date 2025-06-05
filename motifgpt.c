@@ -510,60 +510,24 @@ static void focus_callback(Widget w, XtPointer client_data, XtPointer call_data)
     }
 }
 
-// Specific focus IN callback for settings text fields with placeholders
-static void settings_text_field_focus_in_cb(Widget w, XtPointer client_data, XtPointer call_data) {
-    const char* placeholder = (const char*) client_data;
-    char *current_text = XmTextFieldGetString(w);
-    if (current_text && placeholder && strcmp(current_text, placeholder) == 0) {
-        Pixel current_fg;
-        XtVaGetValues(w, XmNforeground, &current_fg, NULL);
-        if (current_fg == grey_fg_color) {
-            XmTextFieldSetString(w, "");
-            XtVaSetValues(w, XmNforeground, normal_fg_color, NULL);
-        }
-    }
-    XtFree(current_text);
-    focus_callback(w, NULL, call_data); // Call general focus handler too
-}
-
-// Specific focus OUT callback for settings text fields with placeholders
-static void settings_text_field_focus_out_cb(Widget w, XtPointer client_data, XtPointer call_data) {
-    const char* placeholder = (const char*) client_data;
-    char *current_text = XmTextFieldGetString(w);
-    if (current_text && placeholder && strlen(current_text) == 0) { // Field is empty
-        XmTextFieldSetString(w, (char*)placeholder); // Cast placeholder
-        XtVaSetValues(w, XmNforeground, grey_fg_color, NULL);
-    } else if (current_text && placeholder && strcmp(current_text, placeholder) != 0) {
-        // User typed something else, ensure normal color
-        XtVaSetValues(w, XmNforeground, normal_fg_color, NULL);
-    }
-    XtFree(current_text);
-}
-
-
-static void openai_base_url_focus_in_cb(Widget w, XtPointer client_data, XtPointer call_data) {
-    settings_text_field_focus_in_cb(w, (XtPointer)DEFAULT_OPENAI_BASE_URL, call_data);
-}
-static void openai_base_url_focus_out_cb(Widget w, XtPointer client_data, XtPointer call_data) {
-    settings_text_field_focus_out_cb(w, (XtPointer)DEFAULT_OPENAI_BASE_URL, call_data);
-}
-
-
 void cut_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     if (focused_text_widget && XtIsManaged(focused_text_widget) && (XmIsText(focused_text_widget) || XmIsTextField(focused_text_widget)) && XmTextGetEditable(focused_text_widget)) {
         XmTextCut(focused_text_widget, XtLastTimestampProcessed(XtDisplay(focused_text_widget)));
     }
 }
+
 void copy_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     if (focused_text_widget && XtIsManaged(focused_text_widget) && (XmIsText(focused_text_widget) || XmIsTextField(focused_text_widget))) {
         XmTextCopy(focused_text_widget, XtLastTimestampProcessed(XtDisplay(focused_text_widget)));
     }
 }
+
 void paste_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     if (focused_text_widget && XtIsManaged(focused_text_widget) && (XmIsText(focused_text_widget) || XmIsTextField(focused_text_widget)) && XmTextGetEditable(focused_text_widget)) {
         XmTextPaste(focused_text_widget);
     }
 }
+
 void select_all_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     if (focused_text_widget && XtIsManaged(focused_text_widget) && (XmIsText(focused_text_widget) || XmIsTextField(focused_text_widget))) {
         XmTextSetSelection(focused_text_widget, 0, XmTextGetLastPosition(focused_text_widget), CurrentTime);
