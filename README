@@ -1,0 +1,24 @@
+MotifGPT
+========
+
+A Motif-based LLM Chat Client.
+
+
+Dependencies
+------------
+
+To build MotifGPT, you will need the following libraries and their development headers:
+
+- A Motif implementation (e.g., OpenMotif, Lesstif)
+- libcurl
+- libcjson
+- libdisasterparty
+
+
+Building from Source
+--------------------
+
+    $ ./autogen.sh   # Only needed if building from a git clone
+    $ ./configure
+    $ make
+    $ sudo make install

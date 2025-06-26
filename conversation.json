@@ -1,0 +1,13 @@
+[{
+		"role":	"user",
+		"parts":	[{
+				"type":	"text",
+				"text":	"Hey! How are you? "
+			}]
+	}, {
+		"role":	"assistant",
+		"parts":	[{
+				"type":	"text",
+				"text":	"Hey! I’m just a bunch of code, but I’m here and ready to help. 😊 How can I assist you today?"
+			}]
+	}]

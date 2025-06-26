@@ -1,0 +1,66 @@
+--- Notepad Debug Log Initialized ---
+DEBUG: load_file - Attempting to open: motifgpt.c
+DEBUG: In _update_status_bar_core. Current overwrite_mode: False
+DEBUG: _update_status_bar_core - status_ins_ovr label updated to 'INS'.
+DEBUG: In _update_status_bar_core. Current overwrite_mode: False
+DEBUG: _update_status_bar_core - status_ins_ovr label updated to 'INS'.
+DEBUG: main - Initial XmTextSetAddMode(True (Insert)) called. App overwrite_mode is False.
+DEBUG: In _update_status_bar_core. Current overwrite_mode: False
+DEBUG: _update_status_bar_core - status_ins_ovr label updated to 'INS'.
+DEBUG: In timed_update_status_bar_cb, calling update_status_bar()
+DEBUG: In _update_status_bar_core. Current overwrite_mode: False
+DEBUG: _update_status_bar_core - status_ins_ovr label updated to 'INS'.
+DEBUG: focus_cb called. App overwrite_mode is: False (INS). (Widget add_mode not checked here anymore to change app state)
+DEBUG: focus_cb - Info: Widget's XmTextGetAddMode is: True (INS).
+DEBUG: In _update_status_bar_core. Current overwrite_mode: False
+DEBUG: _update_status_bar_core - status_ins_ovr label updated to 'INS'.
+DEBUG: focus_cb - Called update_status_bar(). Label should reflect app overwrite_mode: False (INS)
+DEBUG: In _update_status_bar_core. Current overwrite_mode: False
+DEBUG: _update_status_bar_core - status_ins_ovr label updated to 'INS'.
+DEBUG: In _update_status_bar_core. Current overwrite_mode: False
+DEBUG: _update_status_bar_core - status_ins_ovr label updated to 'INS'.
+DEBUG: In timed_update_status_bar_cb, calling update_status_bar()
+DEBUG: In _update_status_bar_core. Current overwrite_mode: False
+DEBUG: _update_status_bar_core - status_ins_ovr label updated to 'INS'.
+DEBUG: losing_focus_cb called. Updating status bar.
+DEBUG: In _update_status_bar_core. Current overwrite_mode: False
+DEBUG: _update_status_bar_core - status_ins_ovr label updated to 'INS'.
+DEBUG: focus_cb called. App overwrite_mode is: False (INS). (Widget add_mode not checked here anymore to change app state)
+DEBUG: focus_cb - Info: Widget's XmTextGetAddMode is: True (INS).
+DEBUG: In _update_status_bar_core. Current overwrite_mode: False
+DEBUG: _update_status_bar_core - status_ins_ovr label updated to 'INS'.
+DEBUG: focus_cb - Called update_status_bar(). Label should reflect app overwrite_mode: False (INS)
+DEBUG: In _update_status_bar_core. Current overwrite_mode: False
+DEBUG: _update_status_bar_core - status_ins_ovr label updated to 'INS'.
+DEBUG: sync_overwrite_mode_cb - SYNC! App overwrite_mode was False (INS), Widget add_mode is False (OVR). Setting app overwrite_mode to True (OVR).
+DEBUG: In _update_status_bar_core. Current overwrite_mode: True
+DEBUG: _update_status_bar_core - status_ins_ovr label updated to 'OVR'.
+DEBUG: losing_focus_cb called. Updating status bar.
+DEBUG: In _update_status_bar_core. Current overwrite_mode: True
+DEBUG: _update_status_bar_core - status_ins_ovr label updated to 'OVR'.
+DEBUG: focus_cb called. App overwrite_mode is: True (OVR). (Widget add_mode not checked here anymore to change app state)
+DEBUG: focus_cb - Info: Widget's XmTextGetAddMode is: False (OVR).
+DEBUG: In _update_status_bar_core. Current overwrite_mode: True
+DEBUG: _update_status_bar_core - status_ins_ovr label updated to 'OVR'.
+DEBUG: focus_cb - Called update_status_bar(). Label should reflect app overwrite_mode: True (OVR)
+DEBUG: In _update_status_bar_core. Current overwrite_mode: True
+DEBUG: _update_status_bar_core - status_ins_ovr label updated to 'OVR'.
+DEBUG: In _update_status_bar_core. Current overwrite_mode: True
+DEBUG: _update_status_bar_core - status_ins_ovr label updated to 'OVR'.
+DEBUG: losing_focus_cb called. Updating status bar.
+DEBUG: In _update_status_bar_core. Current overwrite_mode: True
+DEBUG: _update_status_bar_core - status_ins_ovr label updated to 'OVR'.
+DEBUG: focus_cb called. App overwrite_mode is: True (OVR). (Widget add_mode not checked here anymore to change app state)
+DEBUG: focus_cb - Info: Widget's XmTextGetAddMode is: False (OVR).
+DEBUG: In _update_status_bar_core. Current overwrite_mode: True
+DEBUG: _update_status_bar_core - status_ins_ovr label updated to 'OVR'.
+DEBUG: focus_cb - Called update_status_bar(). Label should reflect app overwrite_mode: True (OVR)
+DEBUG: losing_focus_cb called. Updating status bar.
+DEBUG: In _update_status_bar_core. Current overwrite_mode: True
+DEBUG: _update_status_bar_core - status_ins_ovr label updated to 'OVR'.
+DEBUG: focus_cb called. App overwrite_mode is: True (OVR). (Widget add_mode not checked here anymore to change app state)
+DEBUG: focus_cb - Info: Widget's XmTextGetAddMode is: False (OVR).
+DEBUG: In _update_status_bar_core. Current overwrite_mode: True
+DEBUG: _update_status_bar_core - status_ins_ovr label updated to 'OVR'.
+DEBUG: focus_cb - Called update_status_bar(). Label should reflect app overwrite_mode: True (OVR)
+--- Notepad Exiting (QUIT operation) ---
