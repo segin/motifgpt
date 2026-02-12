@@ -181,15 +181,26 @@ void append_to_conversation(const char* text) {
 void append_to_assistant_buffer(const char* text) {
     if (!text) return;
     size_t len = strlen(text);
-    if (current_assistant_response_len + len + 1 > current_assistant_response_capacity) {
-        current_assistant_response_capacity = (current_assistant_response_len + len + 1) * 2;
-        char *new_buf = realloc(current_assistant_response_buffer, current_assistant_response_capacity);
+    if (len > SIZE_MAX - current_assistant_response_len - 1) {
+        fprintf(stderr, "Assistant buffer overflow: total length would exceed SIZE_MAX\n");
+        return;
+    }
+    size_t needed = current_assistant_response_len + len + 1;
+    if (needed > current_assistant_response_capacity) {
+        size_t new_capacity = needed;
+        if (new_capacity <= SIZE_MAX / 2) {
+            new_capacity *= 2;
+        } else {
+            new_capacity = SIZE_MAX;
+        }
+        char *new_buf = realloc(current_assistant_response_buffer, new_capacity);
         if (!new_buf) {
             perror("realloc assistant_buffer"); free(current_assistant_response_buffer);
             current_assistant_response_buffer = NULL; current_assistant_response_len = 0; current_assistant_response_capacity = 0;
             return;
         }
         current_assistant_response_buffer = new_buf;
+        current_assistant_response_capacity = new_capacity;
     }
     memcpy(current_assistant_response_buffer + current_assistant_response_len, text, len);
     current_assistant_response_len += len;
@@ -401,14 +412,14 @@ void start_llm_request() {
     } else {
          snprintf(display_msg_text_part, sizeof(display_msg_text_part), "%s: ", USER_NICKNAME);
     }
-    char full_display_msg[2048]; strcpy(full_display_msg, display_msg_text_part);
+    char full_display_msg[2048 + PATH_MAX];
     if (attached_image_base64_data) {
-        char image_indicator[FILENAME_MAX + 50];
         char path_copy[PATH_MAX]; strncpy(path_copy, attached_image_path, PATH_MAX); path_copy[PATH_MAX-1] = '\0';
-        snprintf(image_indicator, sizeof(image_indicator), " [Image Attached: %s]", basename(path_copy));
-        strcat(full_display_msg, image_indicator);
+        snprintf(full_display_msg, sizeof(full_display_msg), "%s [Image Attached: %s]\n", display_msg_text_part, basename(path_copy));
+    } else {
+        snprintf(full_display_msg, sizeof(full_display_msg), "%s\n", display_msg_text_part);
     }
-    strcat(full_display_msg, "\n"); append_to_conversation(full_display_msg);
+    append_to_conversation(full_display_msg);
     add_message_to_history(DP_ROLE_USER, input_string_raw ? input_string_raw : "",
                            attached_image_base64_data ? attached_image_mime_type : NULL,
                            attached_image_base64_data);
