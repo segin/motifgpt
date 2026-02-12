@@ -142,6 +142,7 @@ void free_chat_history();
 void remove_oldest_history_messages(int);
 void *perform_llm_request_thread(void*);
 void initialize_dp_context();
+void generate_system_prompt(char *, size_t, const char *, Boolean);
 char* get_config_path(const char*);
 int ensure_config_dir_exists();
 void load_settings();
@@ -376,6 +377,32 @@ void *perform_llm_request_thread(void *arg) {
     return NULL;
 }
 
+void generate_system_prompt(char *buffer, size_t buffer_size, const char *custom_prompt, Boolean append_default) {
+    char default_prompt[512];
+    time_t now = time(0);
+    struct tm* ltm = localtime(&now);
+    char dateStr[80];
+    strftime(dateStr, sizeof(dateStr), "%A, %B %d, %Y", ltm);
+    snprintf(default_prompt, sizeof(default_prompt),
+             "- You are MotifGPT, an assistant whose client program runs on UNIX with the Motif toolkit.\n"
+             "- The current date is %s.\n"
+             "- The user's environment does not format Markdown. Do not produce any Markdown unless the user explicitly requests it.",
+             dateStr);
+
+    if (!custom_prompt || strlen(custom_prompt) == 0) {
+        strncpy(buffer, default_prompt, buffer_size - 1);
+        buffer[buffer_size - 1] = '\0';
+    } else {
+        if (append_default) {
+            snprintf(buffer, buffer_size,
+                     "%s\n\n%s", default_prompt, custom_prompt);
+        } else {
+            strncpy(buffer, custom_prompt, buffer_size - 1);
+            buffer[buffer_size - 1] = '\0';
+        }
+    }
+}
+
 void start_llm_request() {
     char *input_string_raw = XmTextGetString(input_text);
     if ((!input_string_raw || strlen(input_string_raw) == 0) && !attached_image_base64_data) {
@@ -431,28 +458,7 @@ void start_llm_request() {
         thread_data->config.model = current_anthropic_model;
     }
 
-    // --- System Prompt Logic (ported from BeGPT) ---
-    char default_prompt[512];
-    time_t now = time(0);
-    struct tm* ltm = localtime(&now);
-    char dateStr[80];
-    strftime(dateStr, sizeof(dateStr), "%A, %B %d, %Y", ltm);
-    snprintf(default_prompt, sizeof(default_prompt),
-             "- You are MotifGPT, an assistant whose client program runs on UNIX with the Motif toolkit.\n"
-             "- The current date is %s.\n"
-             "- The user's environment does not format Markdown. Do not produce any Markdown unless the user explicitly requests it.",
-             dateStr);
-
-    if (strlen(current_system_prompt) == 0) {
-        strncpy(thread_data->system_prompt_buffer, default_prompt, sizeof(thread_data->system_prompt_buffer) - 1);
-    } else {
-        if (append_default_system_prompt) {
-            snprintf(thread_data->system_prompt_buffer, sizeof(thread_data->system_prompt_buffer),
-                     "%s\n\n%s", default_prompt, current_system_prompt);
-        } else {
-            strncpy(thread_data->system_prompt_buffer, current_system_prompt, sizeof(thread_data->system_prompt_buffer) - 1);
-        }
-    }
+    generate_system_prompt(thread_data->system_prompt_buffer, sizeof(thread_data->system_prompt_buffer), current_system_prompt, append_default_system_prompt);
     // The config.system_prompt pointer will be set inside the thread to point to system_prompt_buffer.
     // This avoids passing a pointer to a stack variable to the new thread.
 
