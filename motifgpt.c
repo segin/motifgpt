@@ -169,6 +169,7 @@ void populate_settings_dialog(); void retrieve_settings_from_dialog();
 void settings_disable_history_limit_toggle_cb(Widget, XtPointer, XtPointer);
 static void openai_base_url_focus_in_cb(Widget, XtPointer, XtPointer);
 static void openai_base_url_focus_out_cb(Widget, XtPointer, XtPointer);
+void setup_ui(void);
 
 
 void append_to_conversation(const char* text) {
@@ -1489,8 +1490,7 @@ void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     XtPopup(settings_shell, XtGrabNone);
 }
 
-int main(int argc, char **argv) {
-    XtAppContext app_context;
+void setup_ui(void) {
     Widget main_window, menu_bar, main_form;
     Widget chat_area_paned, input_form, bottom_buttons_form, open_chat_button, save_chat_as_button, file_sep_open;
     Widget file_menu, file_cascade, quit_button_widget, clear_chat_button, settings_button, file_sep_exit;
@@ -1498,45 +1498,6 @@ int main(int argc, char **argv) {
     Widget cut_button, copy_button, paste_button, select_all_button, edit_sep;
     XmString acc_text_ctrl_q, acc_text_ctrl_o, acc_text_ctrl_x, acc_text_ctrl_c, acc_text_ctrl_v, acc_text_ctrl_a;
 
-    if (ensure_config_dir_exists() != 0) {
-        fprintf(stderr, "Warning: Could not create/access config directory. Settings may not persist.\n");
-    }
-    load_settings();
-
-    current_assistant_response_capacity = 1024;
-    current_assistant_response_buffer = malloc(current_assistant_response_capacity);
-    if (!current_assistant_response_buffer) { perror("malloc assistant_buffer"); return 1; }
-    current_assistant_response_buffer[0] = '\0';
-
-    if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) { fprintf(stderr, "Fatal: curl_global_init failed.\n"); return 1; }
-    initialize_dp_context();
-
-    if (pipe(pipe_fds) == -1) {
-        perror("Fatal: pipe failed");
-        if(dp_ctx) dp_destroy_context(dp_ctx); curl_global_cleanup(); return 1;
-    }
-    if (fcntl(pipe_fds[0], F_SETFL, O_NONBLOCK) == -1) {
-        perror("Fatal: fcntl failed"); close(pipe_fds[0]); close(pipe_fds[1]);
-        if(dp_ctx) dp_destroy_context(dp_ctx); curl_global_cleanup(); return 1;
-    }
-
-    app_shell = XtAppInitialize(&app_context, "MotifGPT", NULL, 0, &argc, argv, NULL, NULL, 0);
-    XtAddCallback(app_shell, XmNdestroyCallback, quit_callback, NULL);
-
-    Display *dpy = XtDisplay(app_shell);
-    Colormap cmap = DefaultColormap(dpy, DefaultScreen(dpy));
-    XColor xcolor_grey_val, xcolor_exact_grey;
-    if (XAllocNamedColor(dpy, cmap, "grey70", &xcolor_grey_val, &xcolor_exact_grey)) {
-        grey_fg_color = xcolor_grey_val.pixel;
-    } else {
-        XColor screen_def_grey;
-        screen_def_grey.red = screen_def_grey.green = screen_def_grey.blue = (unsigned short)(0.7 * 65535);
-        if (XAllocColor(dpy, cmap, &screen_def_grey)) {
-            grey_fg_color = screen_def_grey.pixel;
-        } else {
-             grey_fg_color = WhitePixel(dpy, DefaultScreen(dpy)) / 2 + BlackPixel(dpy, DefaultScreen(dpy)) / 2 ;
-        }
-    }
     Widget temp_tf = XmCreateTextField(app_shell, "tempTf", NULL, 0);
     XtVaGetValues(temp_tf, XmNforeground, &normal_fg_color, NULL);
     XtDestroyWidget(temp_tf);
@@ -1613,6 +1574,53 @@ int main(int argc, char **argv) {
     popup_menu = create_text_popup_menu(main_window);
 
     XmMainWindowSetAreas(main_window, menu_bar, NULL, NULL, NULL, main_form);
+}
+
+int main(int argc, char **argv) {
+    XtAppContext app_context;
+
+    if (ensure_config_dir_exists() != 0) {
+        fprintf(stderr, "Warning: Could not create/access config directory. Settings may not persist.\n");
+    }
+    load_settings();
+
+    current_assistant_response_capacity = 1024;
+    current_assistant_response_buffer = malloc(current_assistant_response_capacity);
+    if (!current_assistant_response_buffer) { perror("malloc assistant_buffer"); return 1; }
+    current_assistant_response_buffer[0] = '\0';
+
+    if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) { fprintf(stderr, "Fatal: curl_global_init failed.\n"); return 1; }
+    initialize_dp_context();
+
+    if (pipe(pipe_fds) == -1) {
+        perror("Fatal: pipe failed");
+        if(dp_ctx) dp_destroy_context(dp_ctx); curl_global_cleanup(); return 1;
+    }
+    if (fcntl(pipe_fds[0], F_SETFL, O_NONBLOCK) == -1) {
+        perror("Fatal: fcntl failed"); close(pipe_fds[0]); close(pipe_fds[1]);
+        if(dp_ctx) dp_destroy_context(dp_ctx); curl_global_cleanup(); return 1;
+    }
+
+    app_shell = XtAppInitialize(&app_context, "MotifGPT", NULL, 0, &argc, argv, NULL, NULL, 0);
+    XtAddCallback(app_shell, XmNdestroyCallback, quit_callback, NULL);
+
+    Display *dpy = XtDisplay(app_shell);
+    Colormap cmap = DefaultColormap(dpy, DefaultScreen(dpy));
+    XColor xcolor_grey_val, xcolor_exact_grey;
+    if (XAllocNamedColor(dpy, cmap, "grey70", &xcolor_grey_val, &xcolor_exact_grey)) {
+        grey_fg_color = xcolor_grey_val.pixel;
+    } else {
+        XColor screen_def_grey;
+        screen_def_grey.red = screen_def_grey.green = screen_def_grey.blue = (unsigned short)(0.7 * 65535);
+        if (XAllocColor(dpy, cmap, &screen_def_grey)) {
+            grey_fg_color = screen_def_grey.pixel;
+        } else {
+             grey_fg_color = WhitePixel(dpy, DefaultScreen(dpy)) / 2 + BlackPixel(dpy, DefaultScreen(dpy)) / 2 ;
+        }
+    }
+
+    setup_ui();
+
     XtAppAddInput(app_context, pipe_fds[0], (XtPointer)XtInputReadMask, handle_pipe_input, NULL);
     XtRealizeWidget(app_shell);
     focused_text_widget = input_text;
