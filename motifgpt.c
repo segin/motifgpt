@@ -119,11 +119,14 @@ Pixel normal_fg_color, grey_fg_color;
 
 typedef enum {
     PIPE_MSG_TOKEN, PIPE_MSG_STREAM_END, PIPE_MSG_ERROR,
-    PIPE_MSG_MODEL_LIST_ITEM, PIPE_MSG_MODEL_LIST_END, PIPE_MSG_MODEL_LIST_ERROR
+    PIPE_MSG_MODEL_LIST_ITEM, PIPE_MSG_MODEL_LIST_END, PIPE_MSG_MODEL_LIST_ERROR,
+    PIPE_MSG_IMAGE_LOADED, PIPE_MSG_IMAGE_ERROR
 } pipe_message_type_t;
 typedef struct { pipe_message_type_t type; char data[512]; } pipe_message_t;
 typedef struct { dp_request_config_t config; char system_prompt_buffer[4096]; } llm_thread_data_t;
 typedef struct { dp_provider_type_t provider; char api_key_for_list[256]; char base_url_for_list[256]; } get_models_thread_data_t;
+typedef struct { char filename[PATH_MAX]; } image_load_args_t;
+typedef struct { char *base64_data; char filename[PATH_MAX]; } image_load_result_t;
 
 // Function Prototypes
 void send_message_callback(Widget, XtPointer, XtPointer);
@@ -165,6 +168,7 @@ void settings_callback(Widget, XtPointer, XtPointer); void settings_tab_change_c
 void settings_apply_callback(Widget, XtPointer, XtPointer); void settings_ok_callback(Widget, XtPointer, XtPointer);
 void settings_cancel_callback(Widget, XtPointer, XtPointer); void settings_get_models_callback(Widget, XtPointer, XtPointer);
 void *perform_get_models_thread(void*); void settings_use_selected_model_callback(Widget, XtPointer, XtPointer);
+void *load_image_thread(void*);
 void populate_settings_dialog(); void retrieve_settings_from_dialog();
 void settings_disable_history_limit_toggle_cb(Widget, XtPointer, XtPointer);
 static void openai_base_url_focus_in_cb(Widget, XtPointer, XtPointer);
@@ -283,6 +287,30 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
                 break;
             case PIPE_MSG_MODEL_LIST_END: printf("Model listing complete.\n"); break;
             case PIPE_MSG_MODEL_LIST_ERROR: show_error_dialog(msg.data); break;
+            case PIPE_MSG_IMAGE_LOADED: {
+                image_load_result_t *result;
+                memcpy(&result, msg.data, sizeof(image_load_result_t*));
+
+                if (strncmp(result->filename, attached_image_path, PATH_MAX) == 0) {
+                    if (attached_image_base64_data) free(attached_image_base64_data);
+                    attached_image_base64_data = result->base64_data;
+
+                    char status_msg[PATH_MAX + 50];
+                    char path_copy[PATH_MAX]; strncpy(path_copy, attached_image_path, PATH_MAX); path_copy[PATH_MAX-1] = '\0';
+                    snprintf(status_msg, sizeof(status_msg), "[Image ready: %s]", basename(path_copy));
+                    append_to_conversation(status_msg); append_to_conversation("\n");
+                } else {
+                    printf("Ignored stale image load: %s (expected %s)\n", result->filename, attached_image_path);
+                    free(result->base64_data);
+                }
+                free(result);
+                break;
+            }
+            case PIPE_MSG_IMAGE_ERROR:
+                show_error_dialog(msg.data);
+                attached_image_path[0] = '\0';
+                attached_image_mime_type[0] = '\0';
+                break;
         }
     } else if (nbytes == 0) {
         fprintf(stderr, "handle_pipe_input: EOF on pipe.\n"); XtRemoveInput(*id);
@@ -823,24 +851,83 @@ void save_settings() {
     fclose(fp); printf("Settings saved to %s\n", settings_file);
 }
 
+void *load_image_thread(void *arg) {
+    image_load_args_t *args = (image_load_args_t *)arg;
+    size_t file_size;
+    unsigned char *file_buffer = read_file_to_buffer(args->filename, &file_size);
+    if (!file_buffer) {
+        write_pipe_message(PIPE_MSG_IMAGE_ERROR, "Could not read image file.");
+        free(args);
+        return NULL;
+    }
+    char *base64_data = base64_encode(file_buffer, file_size);
+    free(file_buffer);
+    if (!base64_data) {
+        write_pipe_message(PIPE_MSG_IMAGE_ERROR, "Could not Base64 encode image.");
+        free(args);
+        return NULL;
+    }
+
+    image_load_result_t *result = malloc(sizeof(image_load_result_t));
+    if (result) {
+        result->base64_data = base64_data;
+        strncpy(result->filename, args->filename, PATH_MAX - 1);
+        result->filename[PATH_MAX - 1] = '\0';
+
+        pipe_message_t msg;
+        msg.type = PIPE_MSG_IMAGE_LOADED;
+        memcpy(msg.data, &result, sizeof(image_load_result_t*));
+
+        ssize_t written = write(pipe_fds[1], &msg, sizeof(pipe_message_t));
+        if (written != sizeof(pipe_message_t)) {
+            perror("write_pipe_message (image)");
+            free(base64_data);
+            free(result);
+        }
+    } else {
+        perror("malloc image_result");
+        free(base64_data);
+        write_pipe_message(PIPE_MSG_IMAGE_ERROR, "Memory allocation failed for image result.");
+    }
+
+    free(args);
+    return NULL;
+}
+
 void file_selection_ok_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     XmFileSelectionBoxCallbackStruct *cbs = (XmFileSelectionBoxCallbackStruct *)call_data;
     char *filename = NULL; XmStringGetLtoR(cbs->value, XmFONTLIST_DEFAULT_TAG, &filename);
     if (!filename || strlen(filename) == 0) { XtFree(filename); return; }
+
+    char temp_mime[64] = "";
+    if (strstr(filename, ".png") || strstr(filename, ".PNG")) strcpy(temp_mime, "image/png");
+    else if (strstr(filename, ".jpg") || strstr(filename, ".JPG") || strstr(filename, ".jpeg") || strstr(filename, ".JPEG")) strcpy(temp_mime, "image/jpeg");
+    else if (strstr(filename, ".gif") || strstr(filename, ".GIF")) strcpy(temp_mime, "image/gif");
+    else { show_error_dialog("Unsupported image type (PNG, JPG, GIF)."); XtFree(filename); return; }
+
     strncpy(attached_image_path, filename, PATH_MAX -1); attached_image_path[PATH_MAX-1] = '\0';
-    if (strstr(filename, ".png") || strstr(filename, ".PNG")) strcpy(attached_image_mime_type, "image/png");
-    else if (strstr(filename, ".jpg") || strstr(filename, ".JPG") || strstr(filename, ".jpeg") || strstr(filename, ".JPEG")) strcpy(attached_image_mime_type, "image/jpeg");
-    else if (strstr(filename, ".gif") || strstr(filename, ".GIF")) strcpy(attached_image_mime_type, "image/gif");
-    else { show_error_dialog("Unsupported image type (PNG, JPG, GIF)."); XtFree(filename); attached_image_path[0] = '\0'; return; }
-    size_t file_size; unsigned char *file_buffer = read_file_to_buffer(filename, &file_size); XtFree(filename);
-    if (!file_buffer) { show_error_dialog("Could not read image file."); attached_image_path[0] = '\0'; return; }
-    if (attached_image_base64_data) free(attached_image_base64_data);
-    attached_image_base64_data = base64_encode(file_buffer, file_size); free(file_buffer);
-    if (!attached_image_base64_data) { show_error_dialog("Could not Base64 encode image."); attached_image_path[0] = '\0'; return; }
-    char status_msg[PATH_MAX + 50];
-    char path_copy[PATH_MAX]; strncpy(path_copy, attached_image_path, PATH_MAX); path_copy[PATH_MAX-1] = '\0';
-    snprintf(status_msg, sizeof(status_msg), "[Image ready: %s]", basename(path_copy));
-    append_to_conversation(status_msg); append_to_conversation("\n");
+    strcpy(attached_image_mime_type, temp_mime);
+
+    if (attached_image_base64_data) { free(attached_image_base64_data); attached_image_base64_data = NULL; }
+
+    image_load_args_t *args = malloc(sizeof(image_load_args_t));
+    if (!args) { perror("malloc image_args"); XtFree(filename); return; }
+    strncpy(args->filename, filename, PATH_MAX - 1); args->filename[PATH_MAX-1] = '\0';
+
+    XtFree(filename);
+
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, load_image_thread, args) != 0) {
+        perror("pthread_create image_load");
+        free(args);
+        show_error_dialog("Failed to start image loading thread.");
+    } else {
+        char status_msg[PATH_MAX + 50];
+        char path_copy[PATH_MAX]; strncpy(path_copy, attached_image_path, PATH_MAX); path_copy[PATH_MAX-1] = '\0';
+        snprintf(status_msg, sizeof(status_msg), "Loading image: %s ...\n", basename(path_copy));
+        append_to_conversation(status_msg);
+    }
+
     XtUnmanageChild(w);
 }
 
