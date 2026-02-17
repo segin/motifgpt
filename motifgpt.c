@@ -27,6 +27,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -828,9 +829,9 @@ void file_selection_ok_callback(Widget w, XtPointer client_data, XtPointer call_
     char *filename = NULL; XmStringGetLtoR(cbs->value, XmFONTLIST_DEFAULT_TAG, &filename);
     if (!filename || strlen(filename) == 0) { XtFree(filename); return; }
     strncpy(attached_image_path, filename, PATH_MAX -1); attached_image_path[PATH_MAX-1] = '\0';
-    if (strstr(filename, ".png") || strstr(filename, ".PNG")) strcpy(attached_image_mime_type, "image/png");
-    else if (strstr(filename, ".jpg") || strstr(filename, ".JPG") || strstr(filename, ".jpeg") || strstr(filename, ".JPEG")) strcpy(attached_image_mime_type, "image/jpeg");
-    else if (strstr(filename, ".gif") || strstr(filename, ".GIF")) strcpy(attached_image_mime_type, "image/gif");
+    if (strstr(filename, ".png") || strstr(filename, ".PNG")) snprintf(attached_image_mime_type, sizeof(attached_image_mime_type), "image/png");
+    else if (strstr(filename, ".jpg") || strstr(filename, ".JPG") || strstr(filename, ".jpeg") || strstr(filename, ".JPEG")) snprintf(attached_image_mime_type, sizeof(attached_image_mime_type), "image/jpeg");
+    else if (strstr(filename, ".gif") || strstr(filename, ".GIF")) snprintf(attached_image_mime_type, sizeof(attached_image_mime_type), "image/gif");
     else { show_error_dialog("Unsupported image type (PNG, JPG, GIF)."); XtFree(filename); attached_image_path[0] = '\0'; return; }
     size_t file_size; unsigned char *file_buffer = read_file_to_buffer(filename, &file_size); XtFree(filename);
     if (!file_buffer) { show_error_dialog("Could not read image file."); attached_image_path[0] = '\0'; return; }
