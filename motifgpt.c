@@ -724,7 +724,7 @@ char* get_config_path(const char* filename) {
         snprintf(path, sizeof(path), "%s/.config/motifgpt/%s", env_path, filename);
     }
     if (path[0] == '~') {
-        if (wordexp(path, &p, 0) == 0) {
+        if (wordexp(path, &p, WRDE_NOCMD) == 0) {
             if (p.we_wordc > 0) strncpy(path, p.we_wordv[0], sizeof(path) - 1);
             path[sizeof(path) - 1] = '\0'; wordfree(&p);
         } else { fprintf(stderr, "wordexp failed for path: %s\n", path); }
