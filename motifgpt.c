@@ -42,6 +42,7 @@
 
 #include "disasterparty.h"
 #include <curl/curl.h>
+#include "utils.h"
 
 // --- Configuration ---
 #define DEFAULT_PROVIDER DP_PROVIDER_GOOGLE_GEMINI
@@ -153,8 +154,6 @@ void save_chat_as_callback(Widget, XtPointer, XtPointer);
 void file_selection_open_ok_callback(Widget, XtPointer, XtPointer);
 void file_selection_save_as_ok_callback(Widget, XtPointer, XtPointer);
 void render_all_history();
-unsigned char* read_file_to_buffer(const char*, size_t*);
-char* base64_encode(const unsigned char*, size_t);
 static void popup_handler(Widget, XtPointer, XEvent*, Boolean*);
 Widget create_text_popup_menu(Widget);
 static void numeric_verify_cb(Widget, XtPointer, XtPointer);
@@ -432,27 +431,7 @@ void start_llm_request() {
     }
 
     // --- System Prompt Logic (ported from BeGPT) ---
-    char default_prompt[512];
-    time_t now = time(0);
-    struct tm* ltm = localtime(&now);
-    char dateStr[80];
-    strftime(dateStr, sizeof(dateStr), "%A, %B %d, %Y", ltm);
-    snprintf(default_prompt, sizeof(default_prompt),
-             "- You are MotifGPT, an assistant whose client program runs on UNIX with the Motif toolkit.\n"
-             "- The current date is %s.\n"
-             "- The user's environment does not format Markdown. Do not produce any Markdown unless the user explicitly requests it.",
-             dateStr);
-
-    if (strlen(current_system_prompt) == 0) {
-        strncpy(thread_data->system_prompt_buffer, default_prompt, sizeof(thread_data->system_prompt_buffer) - 1);
-    } else {
-        if (append_default_system_prompt) {
-            snprintf(thread_data->system_prompt_buffer, sizeof(thread_data->system_prompt_buffer),
-                     "%s\n\n%s", default_prompt, current_system_prompt);
-        } else {
-            strncpy(thread_data->system_prompt_buffer, current_system_prompt, sizeof(thread_data->system_prompt_buffer) - 1);
-        }
-    }
+    generate_system_prompt(thread_data->system_prompt_buffer, sizeof(thread_data->system_prompt_buffer), current_system_prompt, append_default_system_prompt);
     // The config.system_prompt pointer will be set inside the thread to point to system_prompt_buffer.
     // This avoids passing a pointer to a stack variable to the new thread.
 
@@ -926,41 +905,6 @@ void save_chat_as_callback(Widget w, XtPointer client_data, XtPointer call_data)
     XtManageChild(file_selector);
 }
 
-char* base64_encode(const unsigned char *data, size_t input_length) {
-    const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    size_t output_length = 4 * ((input_length + 2) / 3);
-    char *encoded_data = malloc(output_length + 1);
-    if (!encoded_data) { perror("malloc base64"); return NULL; }
-    for (size_t i = 0, j = 0; i < input_length;) {
-        uint32_t octet_a = i < input_length ? data[i++] : 0;
-        uint32_t octet_b = i < input_length ? data[i++] : 0;
-        uint32_t octet_c = i < input_length ? data[i++] : 0;
-        uint32_t triple = (octet_a << 16) + (octet_b << 8) + octet_c;
-        encoded_data[j++] = base64_chars[(triple >> 18) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 12) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 6) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 0) & 0x3F];
-    }
-    for (size_t i = 0; i < (3 - input_length % 3) % 3; i++) encoded_data[output_length - 1 - i] = '=';
-    encoded_data[output_length] = '\0';
-    return encoded_data;
-}
-
-unsigned char* read_file_to_buffer(const char* filename, size_t* file_size) {
-    FILE* f = fopen(filename, "rb");
-    if (!f) { perror("fopen read_file"); return NULL; }
-    fseek(f, 0, SEEK_END); long size = ftell(f);
-    if (size < 0 || size > 20 * 1024 * 1024) {
-        fclose(f); fprintf(stderr, "File too large (max 20MB) or ftell error.\n"); return NULL;
-    }
-    *file_size = (size_t)size; fseek(f, 0, SEEK_SET);
-    unsigned char* buffer = malloc(*file_size);
-    if (!buffer) { fclose(f); perror("malloc read_file"); return NULL; }
-    if (fread(buffer, 1, *file_size, f) != *file_size) {
-        fclose(f); free(buffer); fprintf(stderr, "fread error.\n"); return NULL;
-    }
-    fclose(f); return buffer;
-}
 
 void initialize_dp_context() {
     if (dp_ctx) { dp_destroy_context(dp_ctx); dp_ctx = NULL; }
