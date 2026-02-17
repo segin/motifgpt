@@ -18,6 +18,7 @@ Makefile
 Makefile.in
 stamp-h1
 m4/
+!m4/ax_pthread.m4
 
 # Object files and executables
 *.o
