@@ -167,8 +167,6 @@ void settings_cancel_callback(Widget, XtPointer, XtPointer); void settings_get_m
 void *perform_get_models_thread(void*); void settings_use_selected_model_callback(Widget, XtPointer, XtPointer);
 void populate_settings_dialog(); void retrieve_settings_from_dialog();
 void settings_disable_history_limit_toggle_cb(Widget, XtPointer, XtPointer);
-static void openai_base_url_focus_in_cb(Widget, XtPointer, XtPointer);
-static void openai_base_url_focus_out_cb(Widget, XtPointer, XtPointer);
 
 
 void append_to_conversation(const char* text) {
@@ -572,44 +570,93 @@ static void focus_callback(Widget w, XtPointer client_data, XtPointer call_data)
     }
 }
 
+// Helper: Check if widget is currently displaying the placeholder
+Boolean is_placeholder_active(Widget w, const char* placeholder) {
+    if (!w || !placeholder) return False;
+    char *text = XmTextFieldGetString(w);
+    if (!text) return False;
+    Boolean is_active = False;
+    if (strcmp(text, placeholder) == 0) {
+        Pixel fg;
+        XtVaGetValues(w, XmNforeground, &fg, NULL);
+        if (fg == grey_fg_color) is_active = True;
+    }
+    XtFree(text);
+    return is_active;
+}
+
+// Helper: Set widget to display placeholder
+void set_widget_placeholder(Widget w, const char* placeholder) {
+    if (!w || !placeholder) return;
+    XmTextFieldSetString(w, (char*)placeholder);
+    XtVaSetValues(w, XmNforeground, grey_fg_color, NULL);
+}
+
+// Helper: Set widget to display normal value
+void set_widget_value(Widget w, const char* value) {
+    if (!w || !value) return;
+    XmTextFieldSetString(w, (char*)value);
+    XtVaSetValues(w, XmNforeground, normal_fg_color, NULL);
+}
+
+// Helper: Clear placeholder if active (for focus in)
+void clear_placeholder_if_active(Widget w, const char* placeholder) {
+    if (is_placeholder_active(w, placeholder)) {
+         set_widget_value(w, "");
+    }
+}
+
+// Helper: Restore placeholder if empty (for focus out)
+void restore_placeholder_if_empty(Widget w, const char* placeholder) {
+    char *text = XmTextFieldGetString(w);
+    if (text && strlen(text) == 0) {
+        set_widget_placeholder(w, placeholder);
+    } else if (text && strcmp(text, placeholder) != 0) {
+         XtVaSetValues(w, XmNforeground, normal_fg_color, NULL);
+    }
+    if (text) XtFree(text);
+}
+
+// Helper: Set widget value or placeholder (for initialization)
+void set_widget_value_or_placeholder(Widget w, const char* value, const char* placeholder) {
+    if (!value || strlen(value) == 0) {
+        set_widget_placeholder(w, placeholder);
+    } else {
+        set_widget_value(w, value);
+    }
+}
+
+// Helper: Get widget value ignoring placeholder (for retrieval)
+void get_widget_value_ignoring_placeholder(Widget w, const char* placeholder, char* buffer, size_t buffer_size) {
+    if (is_placeholder_active(w, placeholder)) {
+        if (buffer && buffer_size > 0) buffer[0] = '\0';
+    } else {
+        char *text = XmTextFieldGetString(w);
+        if (text) {
+            strncpy(buffer, text, buffer_size - 1);
+            buffer[buffer_size - 1] = '\0';
+            XtFree(text);
+        } else {
+             if (buffer && buffer_size > 0) buffer[0] = '\0';
+        }
+    }
+}
+
 // Specific focus IN callback for settings text fields with placeholders
 static void settings_text_field_focus_in_cb(Widget w, XtPointer client_data, XtPointer call_data) {
     const char* placeholder = (const char*) client_data;
-    char *current_text = XmTextFieldGetString(w);
-    if (current_text && placeholder && strcmp(current_text, placeholder) == 0) {
-        Pixel current_fg;
-        XtVaGetValues(w, XmNforeground, &current_fg, NULL);
-        if (current_fg == grey_fg_color) {
-            XmTextFieldSetString(w, "");
-            XtVaSetValues(w, XmNforeground, normal_fg_color, NULL);
-        }
-    }
-    XtFree(current_text);
+    clear_placeholder_if_active(w, placeholder);
     focus_callback(w, NULL, call_data); // Call general focus handler too
 }
 
 // Specific focus OUT callback for settings text fields with placeholders
 static void settings_text_field_focus_out_cb(Widget w, XtPointer client_data, XtPointer call_data) {
     const char* placeholder = (const char*) client_data;
-    char *current_text = XmTextFieldGetString(w);
-    if (current_text && placeholder && strlen(current_text) == 0) { // Field is empty
-        XmTextFieldSetString(w, (char*)placeholder); // Cast placeholder
-        XtVaSetValues(w, XmNforeground, grey_fg_color, NULL);
-    } else if (current_text && placeholder && strcmp(current_text, placeholder) != 0) {
-        // User typed something else, ensure normal color
-        XtVaSetValues(w, XmNforeground, normal_fg_color, NULL);
-    }
-    XtFree(current_text);
+    restore_placeholder_if_empty(w, placeholder);
     // No need to call general focus_callback on losing focus unless specifically required
 }
 
 
-static void openai_base_url_focus_in_cb(Widget w, XtPointer client_data, XtPointer call_data) {
-    settings_text_field_focus_in_cb(w, (XtPointer)DEFAULT_OPENAI_BASE_URL, call_data);
-}
-static void openai_base_url_focus_out_cb(Widget w, XtPointer client_data, XtPointer call_data) {
-    settings_text_field_focus_out_cb(w, (XtPointer)DEFAULT_OPENAI_BASE_URL, call_data);
-}
 
 
 void cut_callback(Widget w, XtPointer client_data, XtPointer call_data) {
@@ -998,38 +1045,31 @@ void initialize_dp_context() {
     Boolean model_is_placeholder = False;
 
     if (settings_shell) {
-        Pixel fg;
         if (current_api_provider == DP_PROVIDER_GOOGLE_GEMINI) {
             if(gemini_api_key_text && XtIsManaged(gemini_api_key_text)) { // Check if widget is valid
-                XtVaGetValues(gemini_api_key_text, XmNforeground, &fg, NULL);
-                if (strcmp(key_to_use, DEFAULT_GEMINI_KEY_PLACEHOLDER) == 0 && fg == grey_fg_color) key_is_placeholder = True;
+                key_is_placeholder = is_placeholder_active(gemini_api_key_text, DEFAULT_GEMINI_KEY_PLACEHOLDER);
             } else if (strcmp(key_to_use, DEFAULT_GEMINI_KEY_PLACEHOLDER) == 0) key_is_placeholder = True; // Fallback if widget not ready
 
             if(gemini_model_text && XtIsManaged(gemini_model_text)) {
-                XtVaGetValues(gemini_model_text, XmNforeground, &fg, NULL);
-                if (strcmp(model_to_use, DEFAULT_GEMINI_MODEL) == 0 && fg == grey_fg_color) model_is_placeholder = True;
+                model_is_placeholder = is_placeholder_active(gemini_model_text, DEFAULT_GEMINI_MODEL);
             } else if (strcmp(model_to_use, DEFAULT_GEMINI_MODEL) == 0) model_is_placeholder = True;
 
         } else if (current_api_provider == DP_PROVIDER_OPENAI_COMPATIBLE) {
             if(openai_api_key_text && XtIsManaged(openai_api_key_text)) {
-                XtVaGetValues(openai_api_key_text, XmNforeground, &fg, NULL);
-                if (strcmp(key_to_use, DEFAULT_OPENAI_KEY_PLACEHOLDER) == 0 && fg == grey_fg_color) key_is_placeholder = True;
+                key_is_placeholder = is_placeholder_active(openai_api_key_text, DEFAULT_OPENAI_KEY_PLACEHOLDER);
             } else if (strcmp(key_to_use, DEFAULT_OPENAI_KEY_PLACEHOLDER) == 0) key_is_placeholder = True;
 
             if(openai_model_text && XtIsManaged(openai_model_text)) {
-                XtVaGetValues(openai_model_text, XmNforeground, &fg, NULL);
-                if (strcmp(model_to_use, DEFAULT_OPENAI_MODEL) == 0 && fg == grey_fg_color) model_is_placeholder = True;
+                model_is_placeholder = is_placeholder_active(openai_model_text, DEFAULT_OPENAI_MODEL);
             } else if (strcmp(model_to_use, DEFAULT_OPENAI_MODEL) == 0) model_is_placeholder = True;
         }
         else if (current_api_provider == DP_PROVIDER_ANTHROPIC) {
             if(anthropic_api_key_text && XtIsManaged(anthropic_api_key_text)) {
-                XtVaGetValues(anthropic_api_key_text, XmNforeground, &fg, NULL);
-                if (strcmp(key_to_use, DEFAULT_ANTHROPIC_KEY_PLACEHOLDER) == 0 && fg == grey_fg_color) key_is_placeholder = True;
+                key_is_placeholder = is_placeholder_active(anthropic_api_key_text, DEFAULT_ANTHROPIC_KEY_PLACEHOLDER);
             } else if (strcmp(key_to_use, DEFAULT_ANTHROPIC_KEY_PLACEHOLDER) == 0) key_is_placeholder = True;
 
             if(anthropic_model_text && XtIsManaged(anthropic_model_text)) {
-                XtVaGetValues(anthropic_model_text, XmNforeground, &fg, NULL);
-                if (strcmp(model_to_use, DEFAULT_ANTHROPIC_MODEL) == 0 && fg == grey_fg_color) model_is_placeholder = True;
+                model_is_placeholder = is_placeholder_active(anthropic_model_text, DEFAULT_ANTHROPIC_MODEL);
             } else if (strcmp(model_to_use, DEFAULT_ANTHROPIC_MODEL) == 0) model_is_placeholder = True;
         }
     } else { // Fallback if settings_shell not created yet (initial load)
@@ -1096,61 +1136,19 @@ void populate_settings_dialog() {
     XtSetSensitive(history_length_text, !history_limits_disabled);
 
     // Gemini
-    if (strlen(current_gemini_api_key) == 0) {
-        XmTextFieldSetString(gemini_api_key_text, DEFAULT_GEMINI_KEY_PLACEHOLDER);
-        XtVaSetValues(gemini_api_key_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(gemini_api_key_text, current_gemini_api_key);
-        XtVaSetValues(gemini_api_key_text, XmNforeground, normal_fg_color, NULL);
-    }
-    if (strlen(current_gemini_model) == 0) {
-        XmTextFieldSetString(gemini_model_text, DEFAULT_GEMINI_MODEL);
-        XtVaSetValues(gemini_model_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(gemini_model_text, current_gemini_model);
-        XtVaSetValues(gemini_model_text, XmNforeground, normal_fg_color, NULL);
-    }
+    set_widget_value_or_placeholder(gemini_api_key_text, current_gemini_api_key, DEFAULT_GEMINI_KEY_PLACEHOLDER);
+    set_widget_value_or_placeholder(gemini_model_text, current_gemini_model, DEFAULT_GEMINI_MODEL);
     XmListDeleteAllItems(gemini_model_list);
 
     // OpenAI
-    if (strlen(current_openai_api_key) == 0) {
-        XmTextFieldSetString(openai_api_key_text, DEFAULT_OPENAI_KEY_PLACEHOLDER);
-        XtVaSetValues(openai_api_key_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(openai_api_key_text, current_openai_api_key);
-        XtVaSetValues(openai_api_key_text, XmNforeground, normal_fg_color, NULL);
-    }
-    if (strlen(current_openai_model) == 0) {
-        XmTextFieldSetString(openai_model_text, DEFAULT_OPENAI_MODEL);
-        XtVaSetValues(openai_model_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(openai_model_text, current_openai_model);
-        XtVaSetValues(openai_model_text, XmNforeground, normal_fg_color, NULL);
-    }
-    if (strlen(current_openai_base_url) == 0) {
-        XmTextFieldSetString(openai_base_url_text, DEFAULT_OPENAI_BASE_URL);
-        XtVaSetValues(openai_base_url_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(openai_base_url_text, current_openai_base_url);
-        XtVaSetValues(openai_base_url_text, XmNforeground, normal_fg_color, NULL);
-    }
+    set_widget_value_or_placeholder(openai_api_key_text, current_openai_api_key, DEFAULT_OPENAI_KEY_PLACEHOLDER);
+    set_widget_value_or_placeholder(openai_model_text, current_openai_model, DEFAULT_OPENAI_MODEL);
+    set_widget_value_or_placeholder(openai_base_url_text, current_openai_base_url, DEFAULT_OPENAI_BASE_URL);
     XmListDeleteAllItems(openai_model_list);
 
     // Anthropic
-    if (strlen(current_anthropic_api_key) == 0) {
-        XmTextFieldSetString(anthropic_api_key_text, DEFAULT_ANTHROPIC_KEY_PLACEHOLDER);
-        XtVaSetValues(anthropic_api_key_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(anthropic_api_key_text, current_anthropic_api_key);
-        XtVaSetValues(anthropic_api_key_text, XmNforeground, normal_fg_color, NULL);
-    }
-    if (strlen(current_anthropic_model) == 0) {
-        XmTextFieldSetString(anthropic_model_text, DEFAULT_ANTHROPIC_MODEL);
-        XtVaSetValues(anthropic_model_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(anthropic_model_text, current_anthropic_model);
-        XtVaSetValues(anthropic_model_text, XmNforeground, normal_fg_color, NULL);
-    }
+    set_widget_value_or_placeholder(anthropic_api_key_text, current_anthropic_api_key, DEFAULT_ANTHROPIC_KEY_PLACEHOLDER);
+    set_widget_value_or_placeholder(anthropic_model_text, current_anthropic_model, DEFAULT_ANTHROPIC_MODEL);
     XmListDeleteAllItems(anthropic_model_list);
 }
 
@@ -1166,47 +1164,17 @@ void retrieve_settings_from_dialog() {
     history_limits_disabled = XmToggleButtonGetState(disable_history_limit_toggle);
     enter_key_sends_message = XmToggleButtonGetState(enter_sends_message_toggle);
 
-    char *tmp; Pixel fg_color;
+    get_widget_value_ignoring_placeholder(gemini_api_key_text, DEFAULT_GEMINI_KEY_PLACEHOLDER, current_gemini_api_key, sizeof(current_gemini_api_key));
+    get_widget_value_ignoring_placeholder(gemini_model_text, DEFAULT_GEMINI_MODEL, current_gemini_model, sizeof(current_gemini_model));
 
-    tmp = XmTextFieldGetString(gemini_api_key_text);
-    XtVaGetValues(gemini_api_key_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_GEMINI_KEY_PLACEHOLDER) == 0 && fg_color == grey_fg_color) current_gemini_api_key[0] = '\0';
-    else { strncpy(current_gemini_api_key, tmp, sizeof(current_gemini_api_key)-1); current_gemini_api_key[sizeof(current_gemini_api_key)-1]='\0'; }
-    XtFree(tmp);
-    tmp = XmTextFieldGetString(gemini_model_text);
-    XtVaGetValues(gemini_model_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_GEMINI_MODEL) == 0 && fg_color == grey_fg_color) strcpy(current_gemini_model, DEFAULT_GEMINI_MODEL);
-    else { strncpy(current_gemini_model, tmp, sizeof(current_gemini_model)-1); current_gemini_model[sizeof(current_gemini_model)-1]='\0';}
-    XtFree(tmp);
+    get_widget_value_ignoring_placeholder(openai_api_key_text, DEFAULT_OPENAI_KEY_PLACEHOLDER, current_openai_api_key, sizeof(current_openai_api_key));
+    get_widget_value_ignoring_placeholder(openai_model_text, DEFAULT_OPENAI_MODEL, current_openai_model, sizeof(current_openai_model));
+    get_widget_value_ignoring_placeholder(openai_base_url_text, DEFAULT_OPENAI_BASE_URL, current_openai_base_url, sizeof(current_openai_base_url));
 
-    tmp = XmTextFieldGetString(openai_api_key_text);
-    XtVaGetValues(openai_api_key_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_OPENAI_KEY_PLACEHOLDER) == 0 && fg_color == grey_fg_color) current_openai_api_key[0] = '\0';
-    else { strncpy(current_openai_api_key, tmp, sizeof(current_openai_api_key)-1); current_openai_api_key[sizeof(current_openai_api_key)-1]='\0'; }
-    XtFree(tmp);
-    tmp = XmTextFieldGetString(openai_model_text);
-    XtVaGetValues(openai_model_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_OPENAI_MODEL) == 0 && fg_color == grey_fg_color) strcpy(current_openai_model, DEFAULT_OPENAI_MODEL);
-    else { strncpy(current_openai_model, tmp, sizeof(current_openai_model)-1); current_openai_model[sizeof(current_openai_model)-1]='\0';}
-    XtFree(tmp);
-    tmp = XmTextFieldGetString(openai_base_url_text);
-    XtVaGetValues(openai_base_url_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_OPENAI_BASE_URL) == 0 && fg_color == grey_fg_color) current_openai_base_url[0] = '\0';
-    else { strncpy(current_openai_base_url, tmp, sizeof(current_openai_base_url)-1); current_openai_base_url[sizeof(current_openai_base_url)-1]='\0'; }
-    XtFree(tmp);
+    get_widget_value_ignoring_placeholder(anthropic_api_key_text, DEFAULT_ANTHROPIC_KEY_PLACEHOLDER, current_anthropic_api_key, sizeof(current_anthropic_api_key));
+    get_widget_value_ignoring_placeholder(anthropic_model_text, DEFAULT_ANTHROPIC_MODEL, current_anthropic_model, sizeof(current_anthropic_model));
 
-    tmp = XmTextFieldGetString(anthropic_api_key_text);
-    XtVaGetValues(anthropic_api_key_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_ANTHROPIC_KEY_PLACEHOLDER) == 0 && fg_color == grey_fg_color) current_anthropic_api_key[0] = '\0';
-    else { strncpy(current_anthropic_api_key, tmp, sizeof(current_anthropic_api_key)-1); current_anthropic_api_key[sizeof(current_anthropic_api_key)-1]='\0'; }
-    XtFree(tmp);
-    tmp = XmTextFieldGetString(anthropic_model_text);
-    XtVaGetValues(anthropic_model_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_ANTHROPIC_MODEL) == 0 && fg_color == grey_fg_color) strcpy(current_anthropic_model, DEFAULT_ANTHROPIC_MODEL);
-    else { strncpy(current_anthropic_model, tmp, sizeof(current_anthropic_model)-1); current_anthropic_model[sizeof(current_anthropic_model)-1]='\0';}
-    XtFree(tmp);
-
-    tmp = XmTextGetString(system_prompt_text);
+    char *tmp = XmTextGetString(system_prompt_text);
     strncpy(current_system_prompt, tmp, sizeof(current_system_prompt)-1); current_system_prompt[sizeof(current_system_prompt)-1]='\0';
     XtFree(tmp);
     append_default_system_prompt = XmToggleButtonGetState(append_prompt_toggle);
@@ -1270,12 +1238,12 @@ void settings_get_models_callback(Widget w, XtPointer client_data, XtPointer cal
         XmListDeleteAllItems(anthropic_model_list);
     }
 
-    Pixel key_fg;
-    if (tab_type == 0) XtVaGetValues(gemini_api_key_text, XmNforeground, &key_fg, NULL);
-    else if (tab_type == 1) XtVaGetValues(openai_api_key_text, XmNforeground, &key_fg, NULL);
-    else XtVaGetValues(anthropic_api_key_text, XmNforeground, &key_fg, NULL);
+    Boolean key_is_placeholder = False;
+    if (tab_type == 0) key_is_placeholder = is_placeholder_active(gemini_api_key_text, DEFAULT_GEMINI_KEY_PLACEHOLDER);
+    else if (tab_type == 1) key_is_placeholder = is_placeholder_active(openai_api_key_text, DEFAULT_OPENAI_KEY_PLACEHOLDER);
+    else key_is_placeholder = is_placeholder_active(anthropic_api_key_text, DEFAULT_ANTHROPIC_KEY_PLACEHOLDER);
 
-    if (!api_key_str || strlen(api_key_str) == 0 || key_fg == grey_fg_color ) {
+    if (!api_key_str || strlen(api_key_str) == 0 || key_is_placeholder ) {
         show_error_dialog("API Key for the current tab (not placeholder) is required to fetch models.");
         XtFree(api_key_str); if(base_url_str) XtFree(base_url_str); return;
     }
@@ -1433,8 +1401,8 @@ void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
         XtAddEventHandler(openai_api_key_text, ButtonPressMask, False, popup_handler, NULL);
         Widget openai_base_url_label = XtVaCreateManagedWidget("API Base URL (optional):", xmLabelWidgetClass, settings_openai_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_api_key_text, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNalignment, XmALIGNMENT_BEGINNING, NULL);
         openai_base_url_text = XtVaCreateManagedWidget("openaiBaseUrlText", xmTextFieldWidgetClass, settings_openai_tab_content, XmNcolumns, 40, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_base_url_label, XmNtopOffset, 2, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, NULL);
-        XtAddCallback(openai_base_url_text, XmNfocusCallback, openai_base_url_focus_in_cb, NULL);
-        XtAddCallback(openai_base_url_text, XmNlosingFocusCallback, openai_base_url_focus_out_cb, NULL);
+        XtAddCallback(openai_base_url_text, XmNfocusCallback, settings_text_field_focus_in_cb, (XtPointer)DEFAULT_OPENAI_BASE_URL);
+        XtAddCallback(openai_base_url_text, XmNlosingFocusCallback, settings_text_field_focus_out_cb, (XtPointer)DEFAULT_OPENAI_BASE_URL);
         XtAddEventHandler(openai_base_url_text, KeyPressMask, False, app_text_key_press_handler, NULL);
         XtAddEventHandler(openai_base_url_text, ButtonPressMask, False, popup_handler, NULL);
         Widget openai_model_label = XtVaCreateManagedWidget("Model ID:", xmLabelWidgetClass, settings_openai_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_base_url_text, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNalignment, XmALIGNMENT_BEGINNING, NULL);
