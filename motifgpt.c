@@ -27,6 +27,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -181,14 +182,35 @@ void append_to_conversation(const char* text) {
 void append_to_assistant_buffer(const char* text) {
     if (!text) return;
     size_t len = strlen(text);
-    if (current_assistant_response_len + len + 1 > current_assistant_response_capacity) {
-        current_assistant_response_capacity = (current_assistant_response_len + len + 1) * 2;
-        char *new_buf = realloc(current_assistant_response_buffer, current_assistant_response_capacity);
+
+    if (SIZE_MAX - current_assistant_response_len < len + 1) {
+         fprintf(stderr, "Error: Response buffer size overflow.\n");
+         return;
+    }
+    size_t required_len = current_assistant_response_len + len + 1;
+
+    if (required_len > current_assistant_response_capacity) {
+        size_t new_capacity;
+        if (required_len > SIZE_MAX / 2) {
+            new_capacity = SIZE_MAX;
+        } else {
+            new_capacity = required_len * 2;
+        }
+
+        char *new_buf = realloc(current_assistant_response_buffer, new_capacity);
+        if (!new_buf) {
+            if (new_capacity > required_len) {
+                 new_capacity = required_len;
+                 new_buf = realloc(current_assistant_response_buffer, new_capacity);
+            }
+        }
+
         if (!new_buf) {
             perror("realloc assistant_buffer"); free(current_assistant_response_buffer);
             current_assistant_response_buffer = NULL; current_assistant_response_len = 0; current_assistant_response_capacity = 0;
             return;
         }
+        current_assistant_response_capacity = new_capacity;
         current_assistant_response_buffer = new_buf;
     }
     memcpy(current_assistant_response_buffer + current_assistant_response_len, text, len);
