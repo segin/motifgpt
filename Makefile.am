@@ -1,3 +1,4 @@
+SUBDIRS = tests .
 bin_PROGRAMS = motifgpt
 motifgpt_SOURCES = motifgpt.c
 

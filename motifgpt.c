@@ -39,6 +39,7 @@
 #include <limits.h>
 #include <time.h>
 #include <ctype.h>
+#include <stdint.h>
 
 #include "disasterparty.h"
 #include <curl/curl.h>
@@ -1489,6 +1490,7 @@ void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     XtPopup(settings_shell, XtGrabNone);
 }
 
+#ifndef UNIT_TESTING
 int main(int argc, char **argv) {
     XtAppContext app_context;
     Widget main_window, menu_bar, main_form;
@@ -1627,3 +1629,4 @@ int main(int argc, char **argv) {
     if (settings_shell) XtDestroyWidget(settings_shell);
     return 0;
 }
+#endif
