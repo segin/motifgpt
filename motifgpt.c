@@ -122,7 +122,7 @@ typedef enum {
     PIPE_MSG_MODEL_LIST_ITEM, PIPE_MSG_MODEL_LIST_END, PIPE_MSG_MODEL_LIST_ERROR
 } pipe_message_type_t;
 typedef struct { pipe_message_type_t type; char data[512]; } pipe_message_t;
-typedef struct { dp_request_config_t config; char system_prompt_buffer[4096]; } llm_thread_data_t;
+typedef struct { dp_request_config_t config; char system_prompt_buffer[4096]; char temp_history_filename[PATH_MAX]; } llm_thread_data_t;
 typedef struct { dp_provider_type_t provider; char api_key_for_list[256]; char base_url_for_list[256]; } get_models_thread_data_t;
 
 // Function Prototypes
@@ -354,6 +354,24 @@ void free_chat_history() {
 void *perform_llm_request_thread(void *arg) {
     llm_thread_data_t *thread_data = (llm_thread_data_t *)arg;
     dp_response_t response_status = {0};
+
+    // Deserialize chat history from temp file
+    if (strlen(thread_data->temp_history_filename) > 0) {
+        dp_message_t *loaded_messages = NULL;
+        size_t num_loaded = 0;
+        if (dp_deserialize_messages_from_file(thread_data->temp_history_filename, &loaded_messages, &num_loaded) == 0) {
+            thread_data->config.messages = loaded_messages;
+            thread_data->config.num_messages = num_loaded;
+            unlink(thread_data->temp_history_filename); // Remove file immediately after loading
+        } else {
+             write_pipe_message(PIPE_MSG_ERROR, "Failed to load chat history for request.");
+             unlink(thread_data->temp_history_filename);
+             free(thread_data);
+             pthread_detach(pthread_self());
+             return NULL;
+        }
+    }
+
     printf("Thread: LLM request with %d messages.\n", (int)thread_data->config.num_messages);
 
     // Point the config's system_prompt to the buffer inside the struct
@@ -371,6 +389,13 @@ void *perform_llm_request_thread(void *arg) {
         write_pipe_message(PIPE_MSG_ERROR, err_buf);
     }
     dp_free_response_content(&response_status);
+
+    // Free the thread-specific history
+    if (thread_data->config.messages) {
+        dp_free_messages(thread_data->config.messages, thread_data->config.num_messages);
+        free(thread_data->config.messages);
+    }
+
     free(thread_data);
     pthread_detach(pthread_self());
     return NULL;
@@ -458,13 +483,39 @@ void start_llm_request() {
 
     thread_data->config.temperature = 0.7; thread_data->config.max_tokens = 2048;
     thread_data->config.stream = true;
-    thread_data->config.messages = chat_history;
-    thread_data->config.num_messages = chat_history_count;
+
+    // Serialize chat history to temp file to avoid race condition.
+    // We use file serialization because dp_message_t is opaque and we cannot safely deep-copy it in memory without library headers.
+    char temp_filename[PATH_MAX];
+    strcpy(temp_filename, "/tmp/motifgpt_hist_XXXXXX");
+    int fd = mkstemp(temp_filename);
+    if (fd != -1) {
+        close(fd);
+        if (dp_serialize_messages_to_file(chat_history, chat_history_count, temp_filename) == 0) {
+             strncpy(thread_data->temp_history_filename, temp_filename, PATH_MAX - 1);
+             thread_data->temp_history_filename[PATH_MAX - 1] = '\0';
+             thread_data->config.messages = NULL; // Will be loaded in thread
+             thread_data->config.num_messages = 0;
+        } else {
+             perror("dp_serialize_messages_to_file");
+             unlink(temp_filename);
+             free(thread_data);
+             show_error_dialog("Failed to serialize chat history for thread.");
+             return;
+        }
+    } else {
+        perror("mkstemp");
+        free(thread_data);
+        show_error_dialog("Failed to create temp file for history.");
+        return;
+    }
 
     snprintf(current_assistant_prefix, sizeof(current_assistant_prefix), "%s: ", ASSISTANT_NICKNAME);
     pthread_t tid;
     if (pthread_create(&tid, NULL, perform_llm_request_thread, thread_data) != 0) {
-        perror("pthread_create llm_request"); free(thread_data);
+        perror("pthread_create llm_request");
+        if (strlen(thread_data->temp_history_filename) > 0) unlink(thread_data->temp_history_filename);
+        free(thread_data);
         show_error_dialog("Failed to start LLM request thread.");
     }
 }
