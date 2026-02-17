@@ -42,6 +42,7 @@
 
 #include "disasterparty.h"
 #include <curl/curl.h>
+#include "utils.h"
 
 // --- Configuration ---
 #define DEFAULT_PROVIDER DP_PROVIDER_GOOGLE_GEMINI
@@ -153,8 +154,6 @@ void save_chat_as_callback(Widget, XtPointer, XtPointer);
 void file_selection_open_ok_callback(Widget, XtPointer, XtPointer);
 void file_selection_save_as_ok_callback(Widget, XtPointer, XtPointer);
 void render_all_history();
-unsigned char* read_file_to_buffer(const char*, size_t*);
-char* base64_encode(const unsigned char*, size_t);
 static void popup_handler(Widget, XtPointer, XEvent*, Boolean*);
 Widget create_text_popup_menu(Widget);
 static void numeric_verify_cb(Widget, XtPointer, XtPointer);
@@ -827,16 +826,42 @@ void file_selection_ok_callback(Widget w, XtPointer client_data, XtPointer call_
     XmFileSelectionBoxCallbackStruct *cbs = (XmFileSelectionBoxCallbackStruct *)call_data;
     char *filename = NULL; XmStringGetLtoR(cbs->value, XmFONTLIST_DEFAULT_TAG, &filename);
     if (!filename || strlen(filename) == 0) { XtFree(filename); return; }
-    strncpy(attached_image_path, filename, PATH_MAX -1); attached_image_path[PATH_MAX-1] = '\0';
-    if (strstr(filename, ".png") || strstr(filename, ".PNG")) strcpy(attached_image_mime_type, "image/png");
-    else if (strstr(filename, ".jpg") || strstr(filename, ".JPG") || strstr(filename, ".jpeg") || strstr(filename, ".JPEG")) strcpy(attached_image_mime_type, "image/jpeg");
-    else if (strstr(filename, ".gif") || strstr(filename, ".GIF")) strcpy(attached_image_mime_type, "image/gif");
-    else { show_error_dialog("Unsupported image type (PNG, JPG, GIF)."); XtFree(filename); attached_image_path[0] = '\0'; return; }
-    size_t file_size; unsigned char *file_buffer = read_file_to_buffer(filename, &file_size); XtFree(filename);
-    if (!file_buffer) { show_error_dialog("Could not read image file."); attached_image_path[0] = '\0'; return; }
+
+    size_t file_size;
+    unsigned char *file_buffer = read_file_to_buffer(filename, &file_size);
+
+    if (!file_buffer) {
+        show_error_dialog("Could not read image file.");
+        XtFree(filename);
+        attached_image_path[0] = '\0';
+        return;
+    }
+
+    const char* mime_type = get_image_mime_type(file_buffer, file_size);
+    if (!mime_type) {
+        show_error_dialog("Unsupported image type or invalid file content (PNG, JPG, GIF required).");
+        free(file_buffer);
+        XtFree(filename);
+        attached_image_path[0] = '\0';
+        return;
+    }
+
+    strncpy(attached_image_path, filename, PATH_MAX -1);
+    attached_image_path[PATH_MAX-1] = '\0';
+    strncpy(attached_image_mime_type, mime_type, sizeof(attached_image_mime_type) - 1);
+    attached_image_mime_type[sizeof(attached_image_mime_type) - 1] = '\0';
+    XtFree(filename);
+
     if (attached_image_base64_data) free(attached_image_base64_data);
-    attached_image_base64_data = base64_encode(file_buffer, file_size); free(file_buffer);
-    if (!attached_image_base64_data) { show_error_dialog("Could not Base64 encode image."); attached_image_path[0] = '\0'; return; }
+    attached_image_base64_data = base64_encode(file_buffer, file_size);
+    free(file_buffer);
+
+    if (!attached_image_base64_data) {
+        show_error_dialog("Could not Base64 encode image.");
+        attached_image_path[0] = '\0';
+        return;
+    }
+
     char status_msg[PATH_MAX + 50];
     char path_copy[PATH_MAX]; strncpy(path_copy, attached_image_path, PATH_MAX); path_copy[PATH_MAX-1] = '\0';
     snprintf(status_msg, sizeof(status_msg), "[Image ready: %s]", basename(path_copy));
@@ -926,41 +951,6 @@ void save_chat_as_callback(Widget w, XtPointer client_data, XtPointer call_data)
     XtManageChild(file_selector);
 }
 
-char* base64_encode(const unsigned char *data, size_t input_length) {
-    const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    size_t output_length = 4 * ((input_length + 2) / 3);
-    char *encoded_data = malloc(output_length + 1);
-    if (!encoded_data) { perror("malloc base64"); return NULL; }
-    for (size_t i = 0, j = 0; i < input_length;) {
-        uint32_t octet_a = i < input_length ? data[i++] : 0;
-        uint32_t octet_b = i < input_length ? data[i++] : 0;
-        uint32_t octet_c = i < input_length ? data[i++] : 0;
-        uint32_t triple = (octet_a << 16) + (octet_b << 8) + octet_c;
-        encoded_data[j++] = base64_chars[(triple >> 18) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 12) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 6) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 0) & 0x3F];
-    }
-    for (size_t i = 0; i < (3 - input_length % 3) % 3; i++) encoded_data[output_length - 1 - i] = '=';
-    encoded_data[output_length] = '\0';
-    return encoded_data;
-}
-
-unsigned char* read_file_to_buffer(const char* filename, size_t* file_size) {
-    FILE* f = fopen(filename, "rb");
-    if (!f) { perror("fopen read_file"); return NULL; }
-    fseek(f, 0, SEEK_END); long size = ftell(f);
-    if (size < 0 || size > 20 * 1024 * 1024) {
-        fclose(f); fprintf(stderr, "File too large (max 20MB) or ftell error.\n"); return NULL;
-    }
-    *file_size = (size_t)size; fseek(f, 0, SEEK_SET);
-    unsigned char* buffer = malloc(*file_size);
-    if (!buffer) { fclose(f); perror("malloc read_file"); return NULL; }
-    if (fread(buffer, 1, *file_size, f) != *file_size) {
-        fclose(f); free(buffer); fprintf(stderr, "fread error.\n"); return NULL;
-    }
-    fclose(f); return buffer;
-}
 
 void initialize_dp_context() {
     if (dp_ctx) { dp_destroy_context(dp_ctx); dp_ctx = NULL; }
