@@ -39,6 +39,7 @@
 #include <limits.h>
 #include <time.h>
 #include <ctype.h>
+#include <stdint.h>
 
 #include "disasterparty.h"
 #include <curl/curl.h>
@@ -128,6 +129,7 @@ typedef struct { dp_provider_type_t provider; char api_key_for_list[256]; char b
 // Function Prototypes
 void send_message_callback(Widget, XtPointer, XtPointer);
 int stream_handler(const char*, void*, bool, const char*);
+void process_pipe_message(pipe_message_t*);
 void handle_pipe_input(XtPointer, int*, XtInputId*);
 void quit_callback(Widget, XtPointer, XtPointer);
 void show_error_dialog(const char*);
@@ -238,52 +240,56 @@ int stream_handler(const char* token, void* user_data, bool is_final, const char
     return 0;
 }
 
+void process_pipe_message(pipe_message_t *msg) {
+    switch (msg->type) {
+        case PIPE_MSG_TOKEN:
+            if (assistant_is_replying && !prefix_already_added_for_current_reply) {
+                append_to_conversation(current_assistant_prefix);
+                prefix_already_added_for_current_reply = true;
+            }
+            append_to_conversation(msg->data);
+            break;
+        case PIPE_MSG_STREAM_END:
+            if (assistant_is_replying && !prefix_already_added_for_current_reply && current_assistant_response_len == 0) {
+                append_to_conversation(current_assistant_prefix);
+            }
+            append_to_conversation("\n");
+            if (current_assistant_response_buffer && current_assistant_response_len > 0) {
+                add_message_to_history(DP_ROLE_ASSISTANT, current_assistant_response_buffer, NULL, NULL);
+            } else if (assistant_is_replying && current_assistant_response_len == 0) {
+                add_message_to_history(DP_ROLE_ASSISTANT, "", NULL, NULL);
+            }
+            if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
+            current_assistant_response_len = 0;
+            assistant_is_replying = false; prefix_already_added_for_current_reply = false;
+            break;
+        case PIPE_MSG_ERROR:
+            show_error_dialog(msg->data); append_to_conversation(msg->data); append_to_conversation("\n");
+            assistant_is_replying = false; prefix_already_added_for_current_reply = false;
+            break;
+        case PIPE_MSG_MODEL_LIST_ITEM:
+            if (settings_shell && XtIsManaged(settings_shell)) {
+                Widget list_to_update = NULL;
+                if (settings_current_tab_content == settings_gemini_tab_content) list_to_update = gemini_model_list;
+                else if (settings_current_tab_content == settings_openai_tab_content) list_to_update = openai_model_list;
+                else if (settings_current_tab_content == settings_anthropic_tab_content) list_to_update = anthropic_model_list;
+
+                if (list_to_update) {
+                    XmString item = XmStringCreateLocalized(msg->data);
+                    XmListAddItemUnselected(list_to_update, item, 0); XmStringFree(item);
+                }
+            }
+            break;
+        case PIPE_MSG_MODEL_LIST_END: printf("Model listing complete.\n"); break;
+        case PIPE_MSG_MODEL_LIST_ERROR: show_error_dialog(msg->data); break;
+    }
+}
+
 void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
     pipe_message_t msg;
     ssize_t nbytes = read(pipe_fds[0], &msg, sizeof(pipe_message_t));
     if (nbytes == sizeof(pipe_message_t)) {
-        switch (msg.type) {
-            case PIPE_MSG_TOKEN:
-                if (assistant_is_replying && !prefix_already_added_for_current_reply) {
-                    append_to_conversation(current_assistant_prefix);
-                    prefix_already_added_for_current_reply = true;
-                }
-                append_to_conversation(msg.data);
-                break;
-            case PIPE_MSG_STREAM_END:
-                if (assistant_is_replying && !prefix_already_added_for_current_reply && current_assistant_response_len == 0) {
-                    append_to_conversation(current_assistant_prefix);
-                }
-                append_to_conversation("\n");
-                if (current_assistant_response_buffer && current_assistant_response_len > 0) {
-                    add_message_to_history(DP_ROLE_ASSISTANT, current_assistant_response_buffer, NULL, NULL);
-                } else if (assistant_is_replying && current_assistant_response_len == 0) {
-                    add_message_to_history(DP_ROLE_ASSISTANT, "", NULL, NULL);
-                }
-                if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
-                current_assistant_response_len = 0;
-                assistant_is_replying = false; prefix_already_added_for_current_reply = false;
-                break;
-            case PIPE_MSG_ERROR:
-                show_error_dialog(msg.data); append_to_conversation(msg.data); append_to_conversation("\n");
-                assistant_is_replying = false; prefix_already_added_for_current_reply = false;
-                break;
-            case PIPE_MSG_MODEL_LIST_ITEM:
-                if (settings_shell && XtIsManaged(settings_shell)) {
-                    Widget list_to_update = NULL;
-                    if (settings_current_tab_content == settings_gemini_tab_content) list_to_update = gemini_model_list;
-                    else if (settings_current_tab_content == settings_openai_tab_content) list_to_update = openai_model_list;
-                    else if (settings_current_tab_content == settings_anthropic_tab_content) list_to_update = anthropic_model_list;
-
-                    if (list_to_update) {
-                        XmString item = XmStringCreateLocalized(msg.data);
-                        XmListAddItemUnselected(list_to_update, item, 0); XmStringFree(item);
-                    }
-                }
-                break;
-            case PIPE_MSG_MODEL_LIST_END: printf("Model listing complete.\n"); break;
-            case PIPE_MSG_MODEL_LIST_ERROR: show_error_dialog(msg.data); break;
-        }
+        process_pipe_message(&msg);
     } else if (nbytes == 0) {
         fprintf(stderr, "handle_pipe_input: EOF on pipe.\n"); XtRemoveInput(*id);
     } else if (nbytes != -1) {
