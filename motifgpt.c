@@ -42,6 +42,7 @@
 
 #include "disasterparty.h"
 #include <curl/curl.h>
+#include "config_utils.h"
 
 // --- Configuration ---
 #define DEFAULT_PROVIDER DP_PROVIDER_GOOGLE_GEMINI
@@ -56,9 +57,7 @@
 #define ASSISTANT_NICKNAME "Assistant"
 #define DEFAULT_MAX_HISTORY_MESSAGES 100
 #define INTERNAL_MAX_HISTORY_CAPACITY 10000
-#define CONFIG_DIR_MODE 0755
 #define CONFIG_FILE_NAME "settings.conf"
-#define CACHE_DIR_NAME "cache"
 // --- End Configuration ---
 
 // Globals
@@ -142,8 +141,6 @@ void free_chat_history();
 void remove_oldest_history_messages(int);
 void *perform_llm_request_thread(void*);
 void initialize_dp_context();
-char* get_config_path(const char*);
-int ensure_config_dir_exists();
 void load_settings();
 void save_settings();
 void attach_image_callback(Widget, XtPointer, XtPointer);
@@ -710,50 +707,6 @@ Widget create_text_popup_menu(Widget parent_for_menu_shell) {
     return menu;
 }
 
-char* get_config_path(const char* filename) {
-    static char path[PATH_MAX]; wordexp_t p; char *env_path;
-    if (filename == NULL) filename = "";
-    env_path = getenv("XDG_CONFIG_HOME");
-    if (env_path && env_path[0]) {
-        snprintf(path, sizeof(path), "%s/motifgpt/%s", env_path, filename);
-    } else {
-        env_path = getenv("HOME");
-        if (!env_path || !env_path[0]) {
-            fprintf(stderr, "Error: HOME env var not set.\n"); return NULL;
-        }
-        snprintf(path, sizeof(path), "%s/.config/motifgpt/%s", env_path, filename);
-    }
-    if (path[0] == '~') {
-        if (wordexp(path, &p, 0) == 0) {
-            if (p.we_wordc > 0) strncpy(path, p.we_wordv[0], sizeof(path) - 1);
-            path[sizeof(path) - 1] = '\0'; wordfree(&p);
-        } else { fprintf(stderr, "wordexp failed for path: %s\n", path); }
-    }
-    return path;
-}
-
-int ensure_config_dir_exists() {
-    char *base_dir_path_ptr = get_config_path(""); if (!base_dir_path_ptr) return -1;
-    char base_dir_path[PATH_MAX]; strncpy(base_dir_path, base_dir_path_ptr, PATH_MAX -1); base_dir_path[PATH_MAX-1] = '\0';
-    if (base_dir_path[strlen(base_dir_path)-1] == '/') base_dir_path[strlen(base_dir_path)-1] = '\0';
-    struct stat st = {0};
-    if (stat(base_dir_path, &st) == -1) {
-        if (mkdir(base_dir_path, CONFIG_DIR_MODE) == -1 && errno != EEXIST) {
-            char err_msg[PATH_MAX + 100]; snprintf(err_msg, sizeof(err_msg), "mkdir base config dir: %s", base_dir_path);
-            perror(err_msg); return -1;
-        }
-        printf("Created config directory: %s\n", base_dir_path);
-    }
-    char cache_dir_full_path[PATH_MAX];
-    snprintf(cache_dir_full_path, sizeof(cache_dir_full_path), "%s/%s", base_dir_path, CACHE_DIR_NAME);
-    if (stat(cache_dir_full_path, &st) == -1) {
-        if (mkdir(cache_dir_full_path, CONFIG_DIR_MODE) == -1 && errno != EEXIST) {
-            char err_msg[PATH_MAX + 100]; snprintf(err_msg, sizeof(err_msg), "mkdir cache dir: %s", cache_dir_full_path);
-            perror(err_msg);
-        } else { printf("Created cache directory: %s\n", cache_dir_full_path); }
-    }
-    return 0;
-}
 
 void load_settings() {
     char *settings_file = get_config_path(CONFIG_FILE_NAME);
