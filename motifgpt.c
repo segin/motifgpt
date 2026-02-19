@@ -41,6 +41,7 @@
 #include <ctype.h>
 
 #include "disasterparty.h"
+#include "buffer_utils.h"
 #include <curl/curl.h>
 
 // --- Configuration ---
@@ -111,9 +112,6 @@ bool prefix_already_added_for_current_reply = false;
 dp_message_t *chat_history = NULL;
 int chat_history_count = 0;
 int chat_history_capacity = 0;
-char *current_assistant_response_buffer = NULL;
-size_t current_assistant_response_len = 0;
-size_t current_assistant_response_capacity = 0;
 
 Pixel normal_fg_color, grey_fg_color;
 
@@ -153,7 +151,6 @@ void save_chat_as_callback(Widget, XtPointer, XtPointer);
 void file_selection_open_ok_callback(Widget, XtPointer, XtPointer);
 void file_selection_save_as_ok_callback(Widget, XtPointer, XtPointer);
 void render_all_history();
-unsigned char* read_file_to_buffer(const char*, size_t*);
 char* base64_encode(const unsigned char*, size_t);
 static void popup_handler(Widget, XtPointer, XEvent*, Boolean*);
 Widget create_text_popup_menu(Widget);
@@ -178,23 +175,6 @@ void append_to_conversation(const char* text) {
     XmTextShowPosition(conversation_text, XmTextGetLastPosition(conversation_text));
 }
 
-void append_to_assistant_buffer(const char* text) {
-    if (!text) return;
-    size_t len = strlen(text);
-    if (current_assistant_response_len + len + 1 > current_assistant_response_capacity) {
-        current_assistant_response_capacity = (current_assistant_response_len + len + 1) * 2;
-        char *new_buf = realloc(current_assistant_response_buffer, current_assistant_response_capacity);
-        if (!new_buf) {
-            perror("realloc assistant_buffer"); free(current_assistant_response_buffer);
-            current_assistant_response_buffer = NULL; current_assistant_response_len = 0; current_assistant_response_capacity = 0;
-            return;
-        }
-        current_assistant_response_buffer = new_buf;
-    }
-    memcpy(current_assistant_response_buffer + current_assistant_response_len, text, len);
-    current_assistant_response_len += len;
-    current_assistant_response_buffer[current_assistant_response_len] = '\0';
-}
 
 void write_pipe_message(pipe_message_type_t type, const char* data) {
     pipe_message_t msg; msg.type = type;
@@ -218,15 +198,13 @@ int stream_handler(const char* token, void* user_data, bool is_final, const char
     if (error_during_stream) {
         write_pipe_message(PIPE_MSG_ERROR, error_during_stream);
         assistant_is_replying = false; prefix_already_added_for_current_reply = false;
-        if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
-        current_assistant_response_len = 0;
+        reset_assistant_buffer();
         return 1;
     }
     if (!assistant_is_replying) {
         assistant_is_replying = true;
         prefix_already_added_for_current_reply = false;
-        if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
-        current_assistant_response_len = 0;
+        reset_assistant_buffer();
     }
     if (token) {
         append_to_assistant_buffer(token);
@@ -260,8 +238,7 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
                 } else if (assistant_is_replying && current_assistant_response_len == 0) {
                     add_message_to_history(DP_ROLE_ASSISTANT, "", NULL, NULL);
                 }
-                if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
-                current_assistant_response_len = 0;
+                reset_assistant_buffer();
                 assistant_is_replying = false; prefix_already_added_for_current_reply = false;
                 break;
             case PIPE_MSG_ERROR:
@@ -475,7 +452,7 @@ void send_message_callback(Widget w, XtPointer client_data, XtPointer call_data)
 
 void quit_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     printf("Exiting MotifGPT...\n"); save_settings(); free_chat_history();
-    if (current_assistant_response_buffer) free(current_assistant_response_buffer);
+    free_assistant_buffer();
     if (dp_ctx) dp_destroy_context(dp_ctx); curl_global_cleanup();
     if (pipe_fds[0] != -1) close(pipe_fds[0]); if (pipe_fds[1] != -1) close(pipe_fds[1]);
     if (settings_shell) XtDestroyWidget(settings_shell);
@@ -486,8 +463,7 @@ void clear_chat_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     XmTextSetString(conversation_text, ""); free_chat_history();
     append_to_conversation("Chat cleared. Welcome to MotifGPT!\n");
     assistant_is_replying = false; prefix_already_added_for_current_reply = false;
-    if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
-    current_assistant_response_len = 0;
+    reset_assistant_buffer();
 }
 
 void show_error_dialog(const char* message) {
@@ -946,21 +922,6 @@ char* base64_encode(const unsigned char *data, size_t input_length) {
     return encoded_data;
 }
 
-unsigned char* read_file_to_buffer(const char* filename, size_t* file_size) {
-    FILE* f = fopen(filename, "rb");
-    if (!f) { perror("fopen read_file"); return NULL; }
-    fseek(f, 0, SEEK_END); long size = ftell(f);
-    if (size < 0 || size > 20 * 1024 * 1024) {
-        fclose(f); fprintf(stderr, "File too large (max 20MB) or ftell error.\n"); return NULL;
-    }
-    *file_size = (size_t)size; fseek(f, 0, SEEK_SET);
-    unsigned char* buffer = malloc(*file_size);
-    if (!buffer) { fclose(f); perror("malloc read_file"); return NULL; }
-    if (fread(buffer, 1, *file_size, f) != *file_size) {
-        fclose(f); free(buffer); fprintf(stderr, "fread error.\n"); return NULL;
-    }
-    fclose(f); return buffer;
-}
 
 void initialize_dp_context() {
     if (dp_ctx) { dp_destroy_context(dp_ctx); dp_ctx = NULL; }
@@ -1503,10 +1464,7 @@ int main(int argc, char **argv) {
     }
     load_settings();
 
-    current_assistant_response_capacity = 1024;
-    current_assistant_response_buffer = malloc(current_assistant_response_capacity);
-    if (!current_assistant_response_buffer) { perror("malloc assistant_buffer"); return 1; }
-    current_assistant_response_buffer[0] = '\0';
+    init_assistant_buffer();
 
     if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) { fprintf(stderr, "Fatal: curl_global_init failed.\n"); return 1; }
     initialize_dp_context();
@@ -1619,7 +1577,7 @@ int main(int argc, char **argv) {
     append_to_conversation("Welcome to MotifGPT! Type message, Shift+Enter for newline, Enter to send.\n");
     XtAppMainLoop(app_context);
 
-    if (current_assistant_response_buffer) free(current_assistant_response_buffer);
+    free_assistant_buffer();
     free_chat_history();
     if (dp_ctx) dp_destroy_context(dp_ctx);
     curl_global_cleanup();
