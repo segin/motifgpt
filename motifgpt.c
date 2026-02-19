@@ -59,6 +59,22 @@
 #define CONFIG_DIR_MODE 0755
 #define CONFIG_FILE_NAME "settings.conf"
 #define CACHE_DIR_NAME "cache"
+#define API_KEY_BUF_SIZE 256
+#define MODEL_ID_BUF_SIZE 128
+#define API_URL_BUF_SIZE 256
+#define SYSTEM_PROMPT_BUF_SIZE 2048
+#define THREAD_SYSTEM_PROMPT_BUF_SIZE 4096
+#define DISPLAY_MSG_BUF_SIZE 2048
+#define DISPLAY_MSG_PART_BUF_SIZE 1024
+#define MIME_TYPE_BUF_SIZE 64
+#define ASSISTANT_PREFIX_BUF_SIZE 64
+#define PIPE_MSG_DATA_BUF_SIZE 512
+#define ERROR_BUF_SIZE 1024
+#define SMALL_ERROR_BUF_SIZE 512
+#define DEFAULT_PROMPT_BUF_SIZE 512
+#define CONFIG_LINE_BUF_SIZE 512
+#define HISTORY_LINE_BUF_SIZE 8192
+#define INITIAL_ASSISTANT_BUF_CAPACITY 1024
 // --- End Configuration ---
 
 // Globals
@@ -85,27 +101,27 @@ Widget system_prompt_text;
 Widget append_prompt_toggle;
 
 dp_provider_type_t current_api_provider = DEFAULT_PROVIDER;
-char current_gemini_api_key[256] = "";
-char current_gemini_model[128] = DEFAULT_GEMINI_MODEL;
-char current_openai_api_key[256] = "";
-char current_openai_model[128] = DEFAULT_OPENAI_MODEL;
-char current_openai_base_url[256] = "";
-char current_anthropic_api_key[256] = "";
-char current_anthropic_model[128] = DEFAULT_ANTHROPIC_MODEL;
+char current_gemini_api_key[API_KEY_BUF_SIZE] = "";
+char current_gemini_model[MODEL_ID_BUF_SIZE] = DEFAULT_GEMINI_MODEL;
+char current_openai_api_key[API_KEY_BUF_SIZE] = "";
+char current_openai_model[MODEL_ID_BUF_SIZE] = DEFAULT_OPENAI_MODEL;
+char current_openai_base_url[API_URL_BUF_SIZE] = "";
+char current_anthropic_api_key[API_KEY_BUF_SIZE] = "";
+char current_anthropic_model[MODEL_ID_BUF_SIZE] = DEFAULT_ANTHROPIC_MODEL;
 int current_max_history_messages = DEFAULT_MAX_HISTORY_MESSAGES;
 Boolean history_limits_disabled = False;
 Boolean enter_key_sends_message = True;
-char current_system_prompt[2048] = "";
+char current_system_prompt[SYSTEM_PROMPT_BUF_SIZE] = "";
 Boolean append_default_system_prompt = True;
 
 char attached_image_path[PATH_MAX] = "";
-char attached_image_mime_type[64] = "";
+char attached_image_mime_type[MIME_TYPE_BUF_SIZE] = "";
 char *attached_image_base64_data = NULL;
 
 dp_context_t *dp_ctx = NULL;
 int pipe_fds[2];
 bool assistant_is_replying = false;
-char current_assistant_prefix[64];
+char current_assistant_prefix[ASSISTANT_PREFIX_BUF_SIZE];
 bool prefix_already_added_for_current_reply = false;
 
 dp_message_t *chat_history = NULL;
@@ -121,9 +137,9 @@ typedef enum {
     PIPE_MSG_TOKEN, PIPE_MSG_STREAM_END, PIPE_MSG_ERROR,
     PIPE_MSG_MODEL_LIST_ITEM, PIPE_MSG_MODEL_LIST_END, PIPE_MSG_MODEL_LIST_ERROR
 } pipe_message_type_t;
-typedef struct { pipe_message_type_t type; char data[512]; } pipe_message_t;
-typedef struct { dp_request_config_t config; char system_prompt_buffer[4096]; } llm_thread_data_t;
-typedef struct { dp_provider_type_t provider; char api_key_for_list[256]; char base_url_for_list[256]; } get_models_thread_data_t;
+typedef struct { pipe_message_type_t type; char data[PIPE_MSG_DATA_BUF_SIZE]; } pipe_message_t;
+typedef struct { dp_request_config_t config; char system_prompt_buffer[THREAD_SYSTEM_PROMPT_BUF_SIZE]; } llm_thread_data_t;
+typedef struct { dp_provider_type_t provider; char api_key_for_list[API_KEY_BUF_SIZE]; char base_url_for_list[API_URL_BUF_SIZE]; } get_models_thread_data_t;
 
 // Function Prototypes
 void send_message_callback(Widget, XtPointer, XtPointer);
@@ -365,7 +381,7 @@ void *perform_llm_request_thread(void *arg) {
 
     int ret = dp_perform_streaming_completion(dp_ctx, &thread_data->config, stream_handler, NULL, &response_status);
     if (ret != 0) {
-        char err_buf[1024];
+        char err_buf[ERROR_BUF_SIZE];
         snprintf(err_buf, sizeof(err_buf), "LLM Request Failed (Thread) (HTTP %ld): %s",
                  response_status.http_status_code, response_status.error_message ? response_status.error_message : "DP error in thread.");
         write_pipe_message(PIPE_MSG_ERROR, err_buf);
@@ -395,13 +411,13 @@ void start_llm_request() {
         return;
     }
 
-    char display_msg_text_part[1024] = "";
+    char display_msg_text_part[DISPLAY_MSG_PART_BUF_SIZE] = "";
     if (input_string_raw) {
          snprintf(display_msg_text_part, sizeof(display_msg_text_part), "%s: %s", USER_NICKNAME, input_string_raw);
     } else {
          snprintf(display_msg_text_part, sizeof(display_msg_text_part), "%s: ", USER_NICKNAME);
     }
-    char full_display_msg[2048]; strcpy(full_display_msg, display_msg_text_part);
+    char full_display_msg[DISPLAY_MSG_BUF_SIZE]; strcpy(full_display_msg, display_msg_text_part);
     if (attached_image_base64_data) {
         char image_indicator[FILENAME_MAX + 50];
         char path_copy[PATH_MAX]; strncpy(path_copy, attached_image_path, PATH_MAX); path_copy[PATH_MAX-1] = '\0';
@@ -432,7 +448,7 @@ void start_llm_request() {
     }
 
     // --- System Prompt Logic (ported from BeGPT) ---
-    char default_prompt[512];
+    char default_prompt[DEFAULT_PROMPT_BUF_SIZE];
     time_t now = time(0);
     struct tm* ltm = localtime(&now);
     char dateStr[80];
@@ -768,7 +784,7 @@ void load_settings() {
         enter_key_sends_message = True;
         return;
     }
-    char line[512];
+    char line[CONFIG_LINE_BUF_SIZE];
     while (fgets(line, sizeof(line), fp)) {
         char *key = strtok(line, "="); char *value = strtok(NULL, "\n");
         if (key && value) {
@@ -1234,7 +1250,7 @@ void *perform_get_models_thread(void *arg) {
     dp_model_list_t *model_list_struct = NULL; int result = dp_list_models(temp_ctx, &model_list_struct);
     if (result == 0 && model_list_struct) {
         if (model_list_struct->error_message) {
-             char err_buf[512]; snprintf(err_buf, sizeof(err_buf), "API Error (Get Models): %s", model_list_struct->error_message);
+             char err_buf[SMALL_ERROR_BUF_SIZE]; snprintf(err_buf, sizeof(err_buf), "API Error (Get Models): %s", model_list_struct->error_message);
              write_pipe_message(PIPE_MSG_MODEL_LIST_ERROR, err_buf);
         } else {
             for (size_t i = 0; i < model_list_struct->count; ++i) {
@@ -1242,7 +1258,7 @@ void *perform_get_models_thread(void *arg) {
             }
         }
     } else {
-        char err_buf[512];
+        char err_buf[SMALL_ERROR_BUF_SIZE];
         if (model_list_struct && model_list_struct->error_message) {
              snprintf(err_buf, sizeof(err_buf), "Error Get Models (HTTP %ld): %s", model_list_struct->http_status_code, model_list_struct->error_message);
         } else if (model_list_struct) { snprintf(err_buf, sizeof(err_buf), "Error Get Models (HTTP %ld): Unknown API error.", model_list_struct->http_status_code);
@@ -1342,7 +1358,7 @@ void render_all_history() {
     XmTextSetString(conversation_text, ""); // Clear view
     for (int i = 0; i < chat_history_count; i++) {
         const char* nick = (chat_history[i].role == DP_ROLE_USER) ? USER_NICKNAME : ASSISTANT_NICKNAME;
-        char line_buffer[8192];
+        char line_buffer[HISTORY_LINE_BUF_SIZE];
         snprintf(line_buffer, sizeof(line_buffer), "%s: ", nick);
 
         for (size_t j = 0; j < chat_history[i].num_parts; j++) {
@@ -1503,7 +1519,7 @@ int main(int argc, char **argv) {
     }
     load_settings();
 
-    current_assistant_response_capacity = 1024;
+    current_assistant_response_capacity = INITIAL_ASSISTANT_BUF_CAPACITY;
     current_assistant_response_buffer = malloc(current_assistant_response_capacity);
     if (!current_assistant_response_buffer) { perror("malloc assistant_buffer"); return 1; }
     current_assistant_response_buffer[0] = '\0';
