@@ -1,11 +1,14 @@
 AC_INIT([motifgpt], [1.0], [bug-report@example.com])
 AC_CONFIG_SRCDIR([motifgpt.c])
-AM_INIT_AUTOMAKE([foreign -Wall -Werror])
+AM_INIT_AUTOMAKE([foreign -Wall -Werror subdir-objects])
 AC_PROG_CC
 
 # Checks for libraries.
-m4_include([m4/ax_pthread.m4])
-AX_PTHREAD
+# AX_PTHREAD replaced by manual check
+AC_CHECK_LIB([pthread], [pthread_create], [PTHREAD_LIBS="-lpthread"], [AC_MSG_ERROR([pthread library not found])])
+PTHREAD_CFLAGS=""
+AC_SUBST(PTHREAD_CFLAGS)
+AC_SUBST(PTHREAD_LIBS)
 
 AC_PATH_XTRA
 if test "x$no_x" = xyes; then
