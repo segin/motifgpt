@@ -42,6 +42,8 @@
 
 #include "disasterparty.h"
 #include <curl/curl.h>
+#include "motifgpt_types.h"
+#include "stream_handler.h"
 
 // --- Configuration ---
 #define DEFAULT_PROVIDER DP_PROVIDER_GOOGLE_GEMINI
@@ -117,17 +119,12 @@ size_t current_assistant_response_capacity = 0;
 
 Pixel normal_fg_color, grey_fg_color;
 
-typedef enum {
-    PIPE_MSG_TOKEN, PIPE_MSG_STREAM_END, PIPE_MSG_ERROR,
-    PIPE_MSG_MODEL_LIST_ITEM, PIPE_MSG_MODEL_LIST_END, PIPE_MSG_MODEL_LIST_ERROR
-} pipe_message_type_t;
 typedef struct { pipe_message_type_t type; char data[512]; } pipe_message_t;
 typedef struct { dp_request_config_t config; char system_prompt_buffer[4096]; } llm_thread_data_t;
 typedef struct { dp_provider_type_t provider; char api_key_for_list[256]; char base_url_for_list[256]; } get_models_thread_data_t;
 
 // Function Prototypes
 void send_message_callback(Widget, XtPointer, XtPointer);
-int stream_handler(const char*, void*, bool, const char*);
 void handle_pipe_input(XtPointer, int*, XtInputId*);
 void quit_callback(Widget, XtPointer, XtPointer);
 void show_error_dialog(const char*);
@@ -178,24 +175,6 @@ void append_to_conversation(const char* text) {
     XmTextShowPosition(conversation_text, XmTextGetLastPosition(conversation_text));
 }
 
-void append_to_assistant_buffer(const char* text) {
-    if (!text) return;
-    size_t len = strlen(text);
-    if (current_assistant_response_len + len + 1 > current_assistant_response_capacity) {
-        current_assistant_response_capacity = (current_assistant_response_len + len + 1) * 2;
-        char *new_buf = realloc(current_assistant_response_buffer, current_assistant_response_capacity);
-        if (!new_buf) {
-            perror("realloc assistant_buffer"); free(current_assistant_response_buffer);
-            current_assistant_response_buffer = NULL; current_assistant_response_len = 0; current_assistant_response_capacity = 0;
-            return;
-        }
-        current_assistant_response_buffer = new_buf;
-    }
-    memcpy(current_assistant_response_buffer + current_assistant_response_len, text, len);
-    current_assistant_response_len += len;
-    current_assistant_response_buffer[current_assistant_response_len] = '\0';
-}
-
 void write_pipe_message(pipe_message_type_t type, const char* data) {
     pipe_message_t msg; msg.type = type;
     if (data) strncpy(msg.data, data, sizeof(msg.data) - 1); else msg.data[0] = '\0';
@@ -212,30 +191,6 @@ void write_pipe_message(pipe_message_type_t type, const char* data) {
              fprintf(stderr, "write_pipe_message: Partial write to pipe (%ld bytes instead of %zu).\n", written, sizeof(pipe_message_t));
         }
     }
-}
-
-int stream_handler(const char* token, void* user_data, bool is_final, const char* error_during_stream) {
-    if (error_during_stream) {
-        write_pipe_message(PIPE_MSG_ERROR, error_during_stream);
-        assistant_is_replying = false; prefix_already_added_for_current_reply = false;
-        if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
-        current_assistant_response_len = 0;
-        return 1;
-    }
-    if (!assistant_is_replying) {
-        assistant_is_replying = true;
-        prefix_already_added_for_current_reply = false;
-        if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
-        current_assistant_response_len = 0;
-    }
-    if (token) {
-        append_to_assistant_buffer(token);
-        write_pipe_message(PIPE_MSG_TOKEN, token);
-    }
-    if (is_final) {
-        write_pipe_message(PIPE_MSG_STREAM_END, NULL);
-    }
-    return 0;
 }
 
 void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
@@ -363,7 +318,16 @@ void *perform_llm_request_thread(void *arg) {
         thread_data->config.system_prompt = NULL;
     }
 
-    int ret = dp_perform_streaming_completion(dp_ctx, &thread_data->config, stream_handler, NULL, &response_status);
+    StreamContext ctx = {
+        .is_replying = &assistant_is_replying,
+        .prefix_added = &prefix_already_added_for_current_reply,
+        .response_buffer = &current_assistant_response_buffer,
+        .response_len = &current_assistant_response_len,
+        .response_capacity = &current_assistant_response_capacity,
+        .write_cb = write_pipe_message
+    };
+
+    int ret = dp_perform_streaming_completion(dp_ctx, &thread_data->config, stream_handler, &ctx, &response_status);
     if (ret != 0) {
         char err_buf[1024];
         snprintf(err_buf, sizeof(err_buf), "LLM Request Failed (Thread) (HTTP %ld): %s",
