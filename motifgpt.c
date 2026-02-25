@@ -823,15 +823,50 @@ void save_settings() {
     fclose(fp); printf("Settings saved to %s\n", settings_file);
 }
 
+const char* get_image_mime_type(const char* filename) {
+    FILE *f = fopen(filename, "rb");
+    if (!f) return NULL;
+
+    unsigned char header[8];
+    size_t read_bytes = fread(header, 1, 8, f);
+    fclose(f);
+
+    if (read_bytes < 8) return NULL; // File too small for reliable detection
+
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    if (header[0] == 0x89 && header[1] == 0x50 && header[2] == 0x4E && header[3] == 0x47 &&
+        header[4] == 0x0D && header[5] == 0x0A && header[6] == 0x1A && header[7] == 0x0A) {
+        return "image/png";
+    }
+
+    // JPEG: FF D8 FF
+    if (header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF) {
+        return "image/jpeg";
+    }
+
+    // GIF: "GIF87a" or "GIF89a" -> 47 49 46 38 37 61 / 39 61
+    if (header[0] == 'G' && header[1] == 'I' && header[2] == 'F' && header[3] == '8' &&
+        (header[4] == '7' || header[4] == '9') && header[5] == 'a') {
+        return "image/gif";
+    }
+
+    return NULL;
+}
+
 void file_selection_ok_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     XmFileSelectionBoxCallbackStruct *cbs = (XmFileSelectionBoxCallbackStruct *)call_data;
     char *filename = NULL; XmStringGetLtoR(cbs->value, XmFONTLIST_DEFAULT_TAG, &filename);
     if (!filename || strlen(filename) == 0) { XtFree(filename); return; }
     strncpy(attached_image_path, filename, PATH_MAX -1); attached_image_path[PATH_MAX-1] = '\0';
-    if (strstr(filename, ".png") || strstr(filename, ".PNG")) strcpy(attached_image_mime_type, "image/png");
-    else if (strstr(filename, ".jpg") || strstr(filename, ".JPG") || strstr(filename, ".jpeg") || strstr(filename, ".JPEG")) strcpy(attached_image_mime_type, "image/jpeg");
-    else if (strstr(filename, ".gif") || strstr(filename, ".GIF")) strcpy(attached_image_mime_type, "image/gif");
-    else { show_error_dialog("Unsupported image type (PNG, JPG, GIF)."); XtFree(filename); attached_image_path[0] = '\0'; return; }
+
+    const char* detected_mime = get_image_mime_type(filename);
+    if (detected_mime) {
+        strcpy(attached_image_mime_type, detected_mime);
+    } else {
+        show_error_dialog("Unsupported image type or invalid file (Magic number mismatch).");
+        XtFree(filename); attached_image_path[0] = '\0'; return;
+    }
+
     size_t file_size; unsigned char *file_buffer = read_file_to_buffer(filename, &file_size); XtFree(filename);
     if (!file_buffer) { show_error_dialog("Could not read image file."); attached_image_path[0] = '\0'; return; }
     if (attached_image_base64_data) free(attached_image_base64_data);
