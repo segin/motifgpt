@@ -1154,6 +1154,25 @@ void populate_settings_dialog() {
     XmListDeleteAllItems(anthropic_model_list);
 }
 
+static void get_setting_value(Widget w, const char* placeholder, char* buffer, size_t buffer_size, Boolean clear_if_placeholder) {
+    char *tmp = XmTextFieldGetString(w);
+    if (!tmp) return;
+
+    if (clear_if_placeholder) {
+        Pixel fg_color;
+        XtVaGetValues(w, XmNforeground, &fg_color, NULL);
+        if (strcmp(tmp, placeholder) == 0 && fg_color == grey_fg_color) {
+            buffer[0] = '\0';
+            XtFree(tmp);
+            return;
+        }
+    }
+
+    strncpy(buffer, tmp, buffer_size - 1);
+    buffer[buffer_size - 1] = '\0';
+    XtFree(tmp);
+}
+
 void retrieve_settings_from_dialog() {
     if (XmToggleButtonGetState(provider_gemini_rb)) current_api_provider = DP_PROVIDER_GOOGLE_GEMINI;
     else if (XmToggleButtonGetState(provider_openai_rb)) current_api_provider = DP_PROVIDER_OPENAI_COMPATIBLE;
@@ -1166,45 +1185,17 @@ void retrieve_settings_from_dialog() {
     history_limits_disabled = XmToggleButtonGetState(disable_history_limit_toggle);
     enter_key_sends_message = XmToggleButtonGetState(enter_sends_message_toggle);
 
-    char *tmp; Pixel fg_color;
+    char *tmp;
 
-    tmp = XmTextFieldGetString(gemini_api_key_text);
-    XtVaGetValues(gemini_api_key_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_GEMINI_KEY_PLACEHOLDER) == 0 && fg_color == grey_fg_color) current_gemini_api_key[0] = '\0';
-    else { strncpy(current_gemini_api_key, tmp, sizeof(current_gemini_api_key)-1); current_gemini_api_key[sizeof(current_gemini_api_key)-1]='\0'; }
-    XtFree(tmp);
-    tmp = XmTextFieldGetString(gemini_model_text);
-    XtVaGetValues(gemini_model_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_GEMINI_MODEL) == 0 && fg_color == grey_fg_color) strcpy(current_gemini_model, DEFAULT_GEMINI_MODEL);
-    else { strncpy(current_gemini_model, tmp, sizeof(current_gemini_model)-1); current_gemini_model[sizeof(current_gemini_model)-1]='\0';}
-    XtFree(tmp);
+    get_setting_value(gemini_api_key_text, DEFAULT_GEMINI_KEY_PLACEHOLDER, current_gemini_api_key, sizeof(current_gemini_api_key), True);
+    get_setting_value(gemini_model_text, DEFAULT_GEMINI_MODEL, current_gemini_model, sizeof(current_gemini_model), False);
 
-    tmp = XmTextFieldGetString(openai_api_key_text);
-    XtVaGetValues(openai_api_key_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_OPENAI_KEY_PLACEHOLDER) == 0 && fg_color == grey_fg_color) current_openai_api_key[0] = '\0';
-    else { strncpy(current_openai_api_key, tmp, sizeof(current_openai_api_key)-1); current_openai_api_key[sizeof(current_openai_api_key)-1]='\0'; }
-    XtFree(tmp);
-    tmp = XmTextFieldGetString(openai_model_text);
-    XtVaGetValues(openai_model_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_OPENAI_MODEL) == 0 && fg_color == grey_fg_color) strcpy(current_openai_model, DEFAULT_OPENAI_MODEL);
-    else { strncpy(current_openai_model, tmp, sizeof(current_openai_model)-1); current_openai_model[sizeof(current_openai_model)-1]='\0';}
-    XtFree(tmp);
-    tmp = XmTextFieldGetString(openai_base_url_text);
-    XtVaGetValues(openai_base_url_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_OPENAI_BASE_URL) == 0 && fg_color == grey_fg_color) current_openai_base_url[0] = '\0';
-    else { strncpy(current_openai_base_url, tmp, sizeof(current_openai_base_url)-1); current_openai_base_url[sizeof(current_openai_base_url)-1]='\0'; }
-    XtFree(tmp);
+    get_setting_value(openai_api_key_text, DEFAULT_OPENAI_KEY_PLACEHOLDER, current_openai_api_key, sizeof(current_openai_api_key), True);
+    get_setting_value(openai_model_text, DEFAULT_OPENAI_MODEL, current_openai_model, sizeof(current_openai_model), False);
+    get_setting_value(openai_base_url_text, DEFAULT_OPENAI_BASE_URL, current_openai_base_url, sizeof(current_openai_base_url), True);
 
-    tmp = XmTextFieldGetString(anthropic_api_key_text);
-    XtVaGetValues(anthropic_api_key_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_ANTHROPIC_KEY_PLACEHOLDER) == 0 && fg_color == grey_fg_color) current_anthropic_api_key[0] = '\0';
-    else { strncpy(current_anthropic_api_key, tmp, sizeof(current_anthropic_api_key)-1); current_anthropic_api_key[sizeof(current_anthropic_api_key)-1]='\0'; }
-    XtFree(tmp);
-    tmp = XmTextFieldGetString(anthropic_model_text);
-    XtVaGetValues(anthropic_model_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_ANTHROPIC_MODEL) == 0 && fg_color == grey_fg_color) strcpy(current_anthropic_model, DEFAULT_ANTHROPIC_MODEL);
-    else { strncpy(current_anthropic_model, tmp, sizeof(current_anthropic_model)-1); current_anthropic_model[sizeof(current_anthropic_model)-1]='\0';}
-    XtFree(tmp);
+    get_setting_value(anthropic_api_key_text, DEFAULT_ANTHROPIC_KEY_PLACEHOLDER, current_anthropic_api_key, sizeof(current_anthropic_api_key), True);
+    get_setting_value(anthropic_model_text, DEFAULT_ANTHROPIC_MODEL, current_anthropic_model, sizeof(current_anthropic_model), False);
 
     tmp = XmTextGetString(system_prompt_text);
     strncpy(current_system_prompt, tmp, sizeof(current_system_prompt)-1); current_system_prompt[sizeof(current_system_prompt)-1]='\0';
