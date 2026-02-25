@@ -1339,23 +1339,86 @@ static void numeric_verify_cb(Widget w, XtPointer client_data, XtPointer call_da
 }
 
 void render_all_history() {
-    XmTextSetString(conversation_text, ""); // Clear view
+    if (!conversation_text) return;
+
+    size_t total_len = 0;
+
+    // Pass 1: Calculate total length required
     for (int i = 0; i < chat_history_count; i++) {
         const char* nick = (chat_history[i].role == DP_ROLE_USER) ? USER_NICKNAME : ASSISTANT_NICKNAME;
-        char line_buffer[8192];
-        snprintf(line_buffer, sizeof(line_buffer), "%s: ", nick);
+        total_len += strlen(nick) + 2; // "%s: "
 
         for (size_t j = 0; j < chat_history[i].num_parts; j++) {
             dp_content_part_t* part = &chat_history[i].parts[j];
             if (part->type == DP_CONTENT_PART_TEXT) {
-                strncat(line_buffer, part->text, sizeof(line_buffer) - strlen(line_buffer) - 1);
+                if (part->text) total_len += strlen(part->text);
             } else if (part->type == DP_CONTENT_PART_IMAGE_BASE64) {
-                strncat(line_buffer, " [Image Attached]", sizeof(line_buffer) - strlen(line_buffer) - 1);
+                total_len += strlen(" [Image Attached]");
             }
         }
-        strncat(line_buffer, "\n", sizeof(line_buffer) - strlen(line_buffer) - 1);
-        append_to_conversation(line_buffer);
+        total_len += 1; // "\n"
     }
+
+    // Allocate buffer (+1 for null terminator)
+    char* full_buffer = malloc(total_len + 1);
+    if (!full_buffer) {
+        fprintf(stderr, "render_all_history: Failed to allocate buffer of size %zu\n", total_len);
+        return;
+    }
+
+    char* current_ptr = full_buffer;
+    size_t remaining = total_len + 1;
+
+    // Pass 2: Build the full conversation string
+    for (int i = 0; i < chat_history_count; i++) {
+        const char* nick = (chat_history[i].role == DP_ROLE_USER) ? USER_NICKNAME : ASSISTANT_NICKNAME;
+
+        int written = snprintf(current_ptr, remaining, "%s: ", nick);
+        if (written > 0 && (size_t)written < remaining) {
+            current_ptr += written;
+            remaining -= written;
+        }
+
+        for (size_t j = 0; j < chat_history[i].num_parts; j++) {
+            dp_content_part_t* part = &chat_history[i].parts[j];
+            if (part->type == DP_CONTENT_PART_TEXT) {
+                if (part->text) {
+                    size_t len = strlen(part->text);
+                    if (len < remaining) {
+                        memcpy(current_ptr, part->text, len);
+                        current_ptr += len;
+                        remaining -= len;
+                        *current_ptr = '\0';
+                    }
+                }
+            } else if (part->type == DP_CONTENT_PART_IMAGE_BASE64) {
+                const char* img_str = " [Image Attached]";
+                size_t len = strlen(img_str);
+                if (len < remaining) {
+                    memcpy(current_ptr, img_str, len);
+                    current_ptr += len;
+                    remaining -= len;
+                    *current_ptr = '\0';
+                }
+            }
+        }
+
+        if (remaining > 1) {
+            *current_ptr = '\n';
+            current_ptr++;
+            remaining--;
+            *current_ptr = '\0';
+        }
+    }
+
+    // Explicit null termination if history was empty or logic edge case
+    if (chat_history_count == 0) full_buffer[0] = '\0';
+
+    // Update widget content in one go
+    XmTextSetString(conversation_text, full_buffer);
+    XmTextShowPosition(conversation_text, XmTextGetLastPosition(conversation_text));
+
+    free(full_buffer);
 }
 
 
