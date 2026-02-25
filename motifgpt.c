@@ -35,13 +35,13 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <libgen.h>
-#include <wordexp.h>
 #include <limits.h>
 #include <time.h>
 #include <ctype.h>
 
 #include "disasterparty.h"
 #include <curl/curl.h>
+#include "config_utils.h"
 
 // --- Configuration ---
 #define DEFAULT_PROVIDER DP_PROVIDER_GOOGLE_GEMINI
@@ -142,7 +142,6 @@ void free_chat_history();
 void remove_oldest_history_messages(int);
 void *perform_llm_request_thread(void*);
 void initialize_dp_context();
-char* get_config_path(const char*);
 int ensure_config_dir_exists();
 void load_settings();
 void save_settings();
@@ -710,27 +709,6 @@ Widget create_text_popup_menu(Widget parent_for_menu_shell) {
     return menu;
 }
 
-char* get_config_path(const char* filename) {
-    static char path[PATH_MAX]; wordexp_t p; char *env_path;
-    if (filename == NULL) filename = "";
-    env_path = getenv("XDG_CONFIG_HOME");
-    if (env_path && env_path[0]) {
-        snprintf(path, sizeof(path), "%s/motifgpt/%s", env_path, filename);
-    } else {
-        env_path = getenv("HOME");
-        if (!env_path || !env_path[0]) {
-            fprintf(stderr, "Error: HOME env var not set.\n"); return NULL;
-        }
-        snprintf(path, sizeof(path), "%s/.config/motifgpt/%s", env_path, filename);
-    }
-    if (path[0] == '~') {
-        if (wordexp(path, &p, 0) == 0) {
-            if (p.we_wordc > 0) strncpy(path, p.we_wordv[0], sizeof(path) - 1);
-            path[sizeof(path) - 1] = '\0'; wordfree(&p);
-        } else { fprintf(stderr, "wordexp failed for path: %s\n", path); }
-    }
-    return path;
-}
 
 int ensure_config_dir_exists() {
     char *base_dir_path_ptr = get_config_path(""); if (!base_dir_path_ptr) return -1;
