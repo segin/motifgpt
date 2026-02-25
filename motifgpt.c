@@ -1489,15 +1489,7 @@ void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     XtPopup(settings_shell, XtGrabNone);
 }
 
-int main(int argc, char **argv) {
-    XtAppContext app_context;
-    Widget main_window, menu_bar, main_form;
-    Widget chat_area_paned, input_form, bottom_buttons_form, open_chat_button, save_chat_as_button, file_sep_open;
-    Widget file_menu, file_cascade, quit_button_widget, clear_chat_button, settings_button, file_sep_exit;
-    Widget edit_menu, edit_cascade;
-    Widget cut_button, copy_button, paste_button, select_all_button, edit_sep;
-    XmString acc_text_ctrl_q, acc_text_ctrl_o, acc_text_ctrl_x, acc_text_ctrl_c, acc_text_ctrl_v, acc_text_ctrl_a;
-
+int initialize_application() {
     if (ensure_config_dir_exists() != 0) {
         fprintf(stderr, "Warning: Could not create/access config directory. Settings may not persist.\n");
     }
@@ -1505,23 +1497,30 @@ int main(int argc, char **argv) {
 
     current_assistant_response_capacity = 1024;
     current_assistant_response_buffer = malloc(current_assistant_response_capacity);
-    if (!current_assistant_response_buffer) { perror("malloc assistant_buffer"); return 1; }
+    if (!current_assistant_response_buffer) { perror("malloc assistant_buffer"); return 0; }
     current_assistant_response_buffer[0] = '\0';
 
-    if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) { fprintf(stderr, "Fatal: curl_global_init failed.\n"); return 1; }
+    if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) { fprintf(stderr, "Fatal: curl_global_init failed.\n"); return 0; }
     initialize_dp_context();
 
     if (pipe(pipe_fds) == -1) {
         perror("Fatal: pipe failed");
-        if(dp_ctx) dp_destroy_context(dp_ctx); curl_global_cleanup(); return 1;
+        if(dp_ctx) dp_destroy_context(dp_ctx); curl_global_cleanup(); return 0;
     }
     if (fcntl(pipe_fds[0], F_SETFL, O_NONBLOCK) == -1) {
         perror("Fatal: fcntl failed"); close(pipe_fds[0]); close(pipe_fds[1]);
-        if(dp_ctx) dp_destroy_context(dp_ctx); curl_global_cleanup(); return 1;
+        if(dp_ctx) dp_destroy_context(dp_ctx); curl_global_cleanup(); return 0;
     }
+    return 1;
+}
 
-    app_shell = XtAppInitialize(&app_context, "MotifGPT", NULL, 0, &argc, argv, NULL, NULL, 0);
-    XtAddCallback(app_shell, XmNdestroyCallback, quit_callback, NULL);
+void setup_ui(XtAppContext app_context) {
+    Widget main_window, menu_bar, main_form;
+    Widget chat_area_paned, input_form, bottom_buttons_form, open_chat_button, save_chat_as_button, file_sep_open;
+    Widget file_menu, file_cascade, quit_button_widget, clear_chat_button, settings_button, file_sep_exit;
+    Widget edit_menu, edit_cascade;
+    Widget cut_button, copy_button, paste_button, select_all_button, edit_sep;
+    XmString acc_text_ctrl_q, acc_text_ctrl_o, acc_text_ctrl_x, acc_text_ctrl_c, acc_text_ctrl_v, acc_text_ctrl_a;
 
     Display *dpy = XtDisplay(app_shell);
     Colormap cmap = DefaultColormap(dpy, DefaultScreen(dpy));
@@ -1614,6 +1613,20 @@ int main(int argc, char **argv) {
 
     XmMainWindowSetAreas(main_window, menu_bar, NULL, NULL, NULL, main_form);
     XtAppAddInput(app_context, pipe_fds[0], (XtPointer)XtInputReadMask, handle_pipe_input, NULL);
+}
+
+int main(int argc, char **argv) {
+    XtAppContext app_context;
+
+    if (!initialize_application()) {
+        return 1;
+    }
+
+    app_shell = XtAppInitialize(&app_context, "MotifGPT", NULL, 0, &argc, argv, NULL, NULL, 0);
+    XtAddCallback(app_shell, XmNdestroyCallback, quit_callback, NULL);
+
+    setup_ui(app_context);
+
     XtRealizeWidget(app_shell);
     focused_text_widget = input_text;
     append_to_conversation("Welcome to MotifGPT! Type message, Shift+Enter for newline, Enter to send.\n");
