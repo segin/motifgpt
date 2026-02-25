@@ -797,10 +797,15 @@ void save_settings() {
     if (ensure_config_dir_exists() != 0) { fprintf(stderr, "Config dir error. Settings not saved.\n"); return; }
     char *settings_file = get_config_path(CONFIG_FILE_NAME);
     if (!settings_file) { fprintf(stderr, "Settings file path error. Not saved.\n"); return; }
-    FILE *fp = fopen(settings_file, "w");
-    if (!fp) {
-        char err_msg[PATH_MAX + 100]; snprintf(err_msg, sizeof(err_msg), "fopen for writing: %s", settings_file);
+    int fd = open(settings_file, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd == -1) {
+        char err_msg[PATH_MAX + 100]; snprintf(err_msg, sizeof(err_msg), "open for writing: %s", settings_file);
         perror(err_msg); return;
+    }
+    FILE *fp = fdopen(fd, "w");
+    if (!fp) {
+        char err_msg[PATH_MAX + 100]; snprintf(err_msg, sizeof(err_msg), "fdopen for writing: %s", settings_file);
+        perror(err_msg); close(fd); return;
     }
     const char* provider_str = "gemini";
     if (current_api_provider == DP_PROVIDER_OPENAI_COMPATIBLE) provider_str = "openai";
