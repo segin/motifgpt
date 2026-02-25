@@ -1343,17 +1343,37 @@ void render_all_history() {
     for (int i = 0; i < chat_history_count; i++) {
         const char* nick = (chat_history[i].role == DP_ROLE_USER) ? USER_NICKNAME : ASSISTANT_NICKNAME;
         char line_buffer[8192];
-        snprintf(line_buffer, sizeof(line_buffer), "%s: ", nick);
+        size_t current_len = 0;
+        int printed = snprintf(line_buffer, sizeof(line_buffer), "%s: ", nick);
+        if (printed > 0) {
+            if ((size_t)printed >= sizeof(line_buffer)) current_len = sizeof(line_buffer) - 1;
+            else current_len = (size_t)printed;
+        }
 
         for (size_t j = 0; j < chat_history[i].num_parts; j++) {
             dp_content_part_t* part = &chat_history[i].parts[j];
+            const char *text_to_append = NULL;
             if (part->type == DP_CONTENT_PART_TEXT) {
-                strncat(line_buffer, part->text, sizeof(line_buffer) - strlen(line_buffer) - 1);
+                text_to_append = part->text;
             } else if (part->type == DP_CONTENT_PART_IMAGE_BASE64) {
-                strncat(line_buffer, " [Image Attached]", sizeof(line_buffer) - strlen(line_buffer) - 1);
+                text_to_append = " [Image Attached]";
+            }
+
+            if (text_to_append) {
+                size_t append_len = strlen(text_to_append);
+                if (current_len < sizeof(line_buffer) - 1) {
+                    size_t available = sizeof(line_buffer) - 1 - current_len;
+                    if (append_len > available) append_len = available;
+                    memcpy(line_buffer + current_len, text_to_append, append_len);
+                    current_len += append_len;
+                    line_buffer[current_len] = '\0';
+                }
             }
         }
-        strncat(line_buffer, "\n", sizeof(line_buffer) - strlen(line_buffer) - 1);
+        if (current_len < sizeof(line_buffer) - 1) {
+            line_buffer[current_len++] = '\n';
+            line_buffer[current_len] = '\0';
+        }
         append_to_conversation(line_buffer);
     }
 }
