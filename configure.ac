@@ -1,10 +1,9 @@
 AC_INIT([motifgpt], [1.0], [bug-report@example.com])
 AC_CONFIG_SRCDIR([motifgpt.c])
-AM_INIT_AUTOMAKE([foreign -Wall -Werror])
+AM_INIT_AUTOMAKE([foreign -Wall -Werror subdir-objects])
 AC_PROG_CC
 
 # Checks for libraries.
-m4_include([m4/ax_pthread.m4])
 AX_PTHREAD
 
 AC_PATH_XTRA
@@ -21,7 +20,7 @@ PKG_CHECK_MODULES([DISASTERPARTY], [libdisasterparty],, [AC_MSG_ERROR([libdisast
 
 # Combine all flags and libs for Makefile.am
 MOTIFGPT_CPPFLAGS="$PTHREAD_CFLAGS $X_CFLAGS $LIBCURL_CFLAGS $LIBCJSON_CFLAGS $DISASTERPARTY_CFLAGS"
-MOTIFGPT_LIBS="$PTHREAD_LIBS $X_LIBS -lXm -lXt $LIBCURL_LIBS $LIBCJSON_LIBS $DISASTERPARTY_LIBS"
+MOTIFGPT_LIBS="$PTHREAD_LIBS $X_LIBS -lXm -lXt -lX11 $LIBCURL_LIBS $LIBCJSON_LIBS $DISASTERPARTY_LIBS"
 
 AC_SUBST(MOTIFGPT_CPPFLAGS)
 AC_SUBST(MOTIFGPT_LIBS)
