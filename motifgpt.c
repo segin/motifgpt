@@ -401,14 +401,25 @@ void start_llm_request() {
     } else {
          snprintf(display_msg_text_part, sizeof(display_msg_text_part), "%s: ", USER_NICKNAME);
     }
-    char full_display_msg[2048]; strcpy(full_display_msg, display_msg_text_part);
+    char full_display_msg[2048];
+    // Safe initialization and concatenation
+    int current_len = snprintf(full_display_msg, sizeof(full_display_msg), "%s", display_msg_text_part);
+    if (current_len < 0) current_len = 0;
+    else if (current_len >= sizeof(full_display_msg)) current_len = sizeof(full_display_msg) - 1;
+
     if (attached_image_base64_data) {
-        char image_indicator[FILENAME_MAX + 50];
         char path_copy[PATH_MAX]; strncpy(path_copy, attached_image_path, PATH_MAX); path_copy[PATH_MAX-1] = '\0';
-        snprintf(image_indicator, sizeof(image_indicator), " [Image Attached: %s]", basename(path_copy));
-        strcat(full_display_msg, image_indicator);
+
+        int written = snprintf(full_display_msg + current_len, sizeof(full_display_msg) - current_len,
+                               " [Image Attached: %s]", basename(path_copy));
+        if (written > 0) {
+             if (current_len + written >= sizeof(full_display_msg)) current_len = sizeof(full_display_msg) - 1;
+             else current_len += written;
+        }
     }
-    strcat(full_display_msg, "\n"); append_to_conversation(full_display_msg);
+    // Append newline safely
+    snprintf(full_display_msg + current_len, sizeof(full_display_msg) - current_len, "\n");
+    append_to_conversation(full_display_msg);
     add_message_to_history(DP_ROLE_USER, input_string_raw ? input_string_raw : "",
                            attached_image_base64_data ? attached_image_mime_type : NULL,
                            attached_image_base64_data);
