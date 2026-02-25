@@ -42,6 +42,7 @@
 
 #include "disasterparty.h"
 #include <curl/curl.h>
+#include "buffer_utils.h"
 
 // --- Configuration ---
 #define DEFAULT_PROVIDER DP_PROVIDER_GOOGLE_GEMINI
@@ -119,11 +120,24 @@ Pixel normal_fg_color, grey_fg_color;
 
 typedef enum {
     PIPE_MSG_TOKEN, PIPE_MSG_STREAM_END, PIPE_MSG_ERROR,
-    PIPE_MSG_MODEL_LIST_ITEM, PIPE_MSG_MODEL_LIST_END, PIPE_MSG_MODEL_LIST_ERROR
+    PIPE_MSG_MODEL_LIST_ITEM, PIPE_MSG_MODEL_LIST_END, PIPE_MSG_MODEL_LIST_ERROR,
+    PIPE_MSG_IMAGE_LOAD_DONE, PIPE_MSG_IMAGE_LOAD_ERROR
 } pipe_message_type_t;
 typedef struct { pipe_message_type_t type; char data[512]; } pipe_message_t;
 typedef struct { dp_request_config_t config; char system_prompt_buffer[4096]; } llm_thread_data_t;
 typedef struct { dp_provider_type_t provider; char api_key_for_list[256]; char base_url_for_list[256]; } get_models_thread_data_t;
+
+typedef struct {
+    char *base64_data;
+    char mime_type[64];
+    char filename[PATH_MAX];
+    char error_msg[256];
+    bool success;
+} image_load_result_t;
+
+typedef struct {
+    char filename[PATH_MAX];
+} image_load_thread_data_t;
 
 // Function Prototypes
 void send_message_callback(Widget, XtPointer, XtPointer);
@@ -141,6 +155,7 @@ void add_message_to_history(dp_message_role_t, const char*, const char*, const c
 void free_chat_history();
 void remove_oldest_history_messages(int);
 void *perform_llm_request_thread(void*);
+void *perform_image_load_thread(void*);
 void initialize_dp_context();
 char* get_config_path(const char*);
 int ensure_config_dir_exists();
@@ -283,6 +298,35 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
                 break;
             case PIPE_MSG_MODEL_LIST_END: printf("Model listing complete.\n"); break;
             case PIPE_MSG_MODEL_LIST_ERROR: show_error_dialog(msg.data); break;
+            case PIPE_MSG_IMAGE_LOAD_DONE: {
+                image_load_result_t *result = NULL;
+                memcpy(&result, msg.data, sizeof(image_load_result_t*));
+                if (result) {
+                    if (result->success) {
+                        strncpy(attached_image_path, result->filename, PATH_MAX - 1);
+                        attached_image_path[PATH_MAX - 1] = '\0';
+                        strncpy(attached_image_mime_type, result->mime_type, sizeof(attached_image_mime_type) - 1);
+                        attached_image_mime_type[sizeof(attached_image_mime_type) - 1] = '\0';
+
+                        if (attached_image_base64_data) free(attached_image_base64_data);
+                        attached_image_base64_data = result->base64_data;
+                        result->base64_data = NULL; // Prevent double free
+
+                        char status_msg[PATH_MAX + 50];
+                        char path_copy[PATH_MAX]; strncpy(path_copy, attached_image_path, PATH_MAX); path_copy[PATH_MAX-1] = '\0';
+                        snprintf(status_msg, sizeof(status_msg), "[Image ready: %s]\n", basename(path_copy));
+                        append_to_conversation(status_msg);
+                    } else {
+                        show_error_dialog(result->error_msg);
+                        char error_log[512];
+                        snprintf(error_log, sizeof(error_log), "Image load failed: %s\n", result->error_msg);
+                        append_to_conversation(error_log);
+                    }
+                    if (result->base64_data) free(result->base64_data);
+                    free(result);
+                }
+                break;
+            }
         }
     } else if (nbytes == 0) {
         fprintf(stderr, "handle_pipe_input: EOF on pipe.\n"); XtRemoveInput(*id);
@@ -371,6 +415,57 @@ void *perform_llm_request_thread(void *arg) {
         write_pipe_message(PIPE_MSG_ERROR, err_buf);
     }
     dp_free_response_content(&response_status);
+    free(thread_data);
+    pthread_detach(pthread_self());
+    return NULL;
+}
+
+void *perform_image_load_thread(void *arg) {
+    image_load_thread_data_t *thread_data = (image_load_thread_data_t *)arg;
+    image_load_result_t *result = malloc(sizeof(image_load_result_t));
+    if (!result) { perror("malloc image_load_result"); free(thread_data); return NULL; }
+
+    result->success = false;
+    strncpy(result->filename, thread_data->filename, PATH_MAX - 1);
+    result->filename[PATH_MAX - 1] = '\0';
+    result->base64_data = NULL;
+    result->mime_type[0] = '\0';
+    result->error_msg[0] = '\0';
+
+    if (strstr(result->filename, ".png") || strstr(result->filename, ".PNG")) strcpy(result->mime_type, "image/png");
+    else if (strstr(result->filename, ".jpg") || strstr(result->filename, ".JPG") || strstr(result->filename, ".jpeg") || strstr(result->filename, ".JPEG")) strcpy(result->mime_type, "image/jpeg");
+    else if (strstr(result->filename, ".gif") || strstr(result->filename, ".GIF")) strcpy(result->mime_type, "image/gif");
+    else {
+        strncpy(result->error_msg, "Unsupported image type (PNG, JPG, GIF).", sizeof(result->error_msg)-1);
+    }
+
+    if (result->mime_type[0] != '\0') {
+        size_t file_size;
+        unsigned char *file_buffer = read_file_to_buffer(result->filename, &file_size);
+        if (file_buffer) {
+            result->base64_data = base64_encode(file_buffer, file_size);
+            free(file_buffer);
+            if (result->base64_data) {
+                result->success = true;
+            } else {
+                strncpy(result->error_msg, "Could not Base64 encode image.", sizeof(result->error_msg)-1);
+            }
+        } else {
+             strncpy(result->error_msg, "Could not read image file.", sizeof(result->error_msg)-1);
+        }
+    }
+
+    pipe_message_t msg;
+    msg.type = PIPE_MSG_IMAGE_LOAD_DONE; // Use DONE for both success/fail to pass the struct
+    memcpy(msg.data, &result, sizeof(image_load_result_t*));
+
+    ssize_t written = write(pipe_fds[1], &msg, sizeof(pipe_message_t));
+    if (written != sizeof(pipe_message_t)) {
+        perror("write pipe image load");
+        if (result->base64_data) free(result->base64_data);
+        free(result);
+    }
+
     free(thread_data);
     pthread_detach(pthread_self());
     return NULL;
@@ -827,20 +922,29 @@ void file_selection_ok_callback(Widget w, XtPointer client_data, XtPointer call_
     XmFileSelectionBoxCallbackStruct *cbs = (XmFileSelectionBoxCallbackStruct *)call_data;
     char *filename = NULL; XmStringGetLtoR(cbs->value, XmFONTLIST_DEFAULT_TAG, &filename);
     if (!filename || strlen(filename) == 0) { XtFree(filename); return; }
-    strncpy(attached_image_path, filename, PATH_MAX -1); attached_image_path[PATH_MAX-1] = '\0';
-    if (strstr(filename, ".png") || strstr(filename, ".PNG")) strcpy(attached_image_mime_type, "image/png");
-    else if (strstr(filename, ".jpg") || strstr(filename, ".JPG") || strstr(filename, ".jpeg") || strstr(filename, ".JPEG")) strcpy(attached_image_mime_type, "image/jpeg");
-    else if (strstr(filename, ".gif") || strstr(filename, ".GIF")) strcpy(attached_image_mime_type, "image/gif");
-    else { show_error_dialog("Unsupported image type (PNG, JPG, GIF)."); XtFree(filename); attached_image_path[0] = '\0'; return; }
-    size_t file_size; unsigned char *file_buffer = read_file_to_buffer(filename, &file_size); XtFree(filename);
-    if (!file_buffer) { show_error_dialog("Could not read image file."); attached_image_path[0] = '\0'; return; }
-    if (attached_image_base64_data) free(attached_image_base64_data);
-    attached_image_base64_data = base64_encode(file_buffer, file_size); free(file_buffer);
-    if (!attached_image_base64_data) { show_error_dialog("Could not Base64 encode image."); attached_image_path[0] = '\0'; return; }
-    char status_msg[PATH_MAX + 50];
-    char path_copy[PATH_MAX]; strncpy(path_copy, attached_image_path, PATH_MAX); path_copy[PATH_MAX-1] = '\0';
-    snprintf(status_msg, sizeof(status_msg), "[Image ready: %s]", basename(path_copy));
-    append_to_conversation(status_msg); append_to_conversation("\n");
+
+    // Clear previous image immediately
+    if (attached_image_base64_data) {
+        free(attached_image_base64_data);
+        attached_image_base64_data = NULL;
+    }
+    attached_image_path[0] = '\0';
+
+    image_load_thread_data_t *thread_data = malloc(sizeof(image_load_thread_data_t));
+    if (!thread_data) { perror("malloc image thread data"); XtFree(filename); return; }
+    strncpy(thread_data->filename, filename, PATH_MAX - 1);
+    thread_data->filename[PATH_MAX - 1] = '\0';
+    XtFree(filename);
+
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, perform_image_load_thread, thread_data) != 0) {
+        perror("pthread_create image load"); free(thread_data);
+        show_error_dialog("Failed to start image loading thread.");
+        XtUnmanageChild(w);
+        return;
+    }
+
+    append_to_conversation("[Processing image...]\n");
     XtUnmanageChild(w);
 }
 
@@ -926,41 +1030,6 @@ void save_chat_as_callback(Widget w, XtPointer client_data, XtPointer call_data)
     XtManageChild(file_selector);
 }
 
-char* base64_encode(const unsigned char *data, size_t input_length) {
-    const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    size_t output_length = 4 * ((input_length + 2) / 3);
-    char *encoded_data = malloc(output_length + 1);
-    if (!encoded_data) { perror("malloc base64"); return NULL; }
-    for (size_t i = 0, j = 0; i < input_length;) {
-        uint32_t octet_a = i < input_length ? data[i++] : 0;
-        uint32_t octet_b = i < input_length ? data[i++] : 0;
-        uint32_t octet_c = i < input_length ? data[i++] : 0;
-        uint32_t triple = (octet_a << 16) + (octet_b << 8) + octet_c;
-        encoded_data[j++] = base64_chars[(triple >> 18) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 12) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 6) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 0) & 0x3F];
-    }
-    for (size_t i = 0; i < (3 - input_length % 3) % 3; i++) encoded_data[output_length - 1 - i] = '=';
-    encoded_data[output_length] = '\0';
-    return encoded_data;
-}
-
-unsigned char* read_file_to_buffer(const char* filename, size_t* file_size) {
-    FILE* f = fopen(filename, "rb");
-    if (!f) { perror("fopen read_file"); return NULL; }
-    fseek(f, 0, SEEK_END); long size = ftell(f);
-    if (size < 0 || size > 20 * 1024 * 1024) {
-        fclose(f); fprintf(stderr, "File too large (max 20MB) or ftell error.\n"); return NULL;
-    }
-    *file_size = (size_t)size; fseek(f, 0, SEEK_SET);
-    unsigned char* buffer = malloc(*file_size);
-    if (!buffer) { fclose(f); perror("malloc read_file"); return NULL; }
-    if (fread(buffer, 1, *file_size, f) != *file_size) {
-        fclose(f); free(buffer); fprintf(stderr, "fread error.\n"); return NULL;
-    }
-    fclose(f); return buffer;
-}
 
 void initialize_dp_context() {
     if (dp_ctx) { dp_destroy_context(dp_ctx); dp_ctx = NULL; }
