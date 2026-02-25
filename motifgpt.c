@@ -167,8 +167,6 @@ void settings_cancel_callback(Widget, XtPointer, XtPointer); void settings_get_m
 void *perform_get_models_thread(void*); void settings_use_selected_model_callback(Widget, XtPointer, XtPointer);
 void populate_settings_dialog(); void retrieve_settings_from_dialog();
 void settings_disable_history_limit_toggle_cb(Widget, XtPointer, XtPointer);
-static void openai_base_url_focus_in_cb(Widget, XtPointer, XtPointer);
-static void openai_base_url_focus_out_cb(Widget, XtPointer, XtPointer);
 
 
 void append_to_conversation(const char* text) {
@@ -601,14 +599,6 @@ static void settings_text_field_focus_out_cb(Widget w, XtPointer client_data, Xt
     }
     XtFree(current_text);
     // No need to call general focus_callback on losing focus unless specifically required
-}
-
-
-static void openai_base_url_focus_in_cb(Widget w, XtPointer client_data, XtPointer call_data) {
-    settings_text_field_focus_in_cb(w, (XtPointer)DEFAULT_OPENAI_BASE_URL, call_data);
-}
-static void openai_base_url_focus_out_cb(Widget w, XtPointer client_data, XtPointer call_data) {
-    settings_text_field_focus_out_cb(w, (XtPointer)DEFAULT_OPENAI_BASE_URL, call_data);
 }
 
 
@@ -1433,8 +1423,8 @@ void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
         XtAddEventHandler(openai_api_key_text, ButtonPressMask, False, popup_handler, NULL);
         Widget openai_base_url_label = XtVaCreateManagedWidget("API Base URL (optional):", xmLabelWidgetClass, settings_openai_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_api_key_text, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNalignment, XmALIGNMENT_BEGINNING, NULL);
         openai_base_url_text = XtVaCreateManagedWidget("openaiBaseUrlText", xmTextFieldWidgetClass, settings_openai_tab_content, XmNcolumns, 40, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_base_url_label, XmNtopOffset, 2, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, NULL);
-        XtAddCallback(openai_base_url_text, XmNfocusCallback, openai_base_url_focus_in_cb, NULL);
-        XtAddCallback(openai_base_url_text, XmNlosingFocusCallback, openai_base_url_focus_out_cb, NULL);
+        XtAddCallback(openai_base_url_text, XmNfocusCallback, settings_text_field_focus_in_cb, (XtPointer)DEFAULT_OPENAI_BASE_URL);
+        XtAddCallback(openai_base_url_text, XmNlosingFocusCallback, settings_text_field_focus_out_cb, (XtPointer)DEFAULT_OPENAI_BASE_URL);
         XtAddEventHandler(openai_base_url_text, KeyPressMask, False, app_text_key_press_handler, NULL);
         XtAddEventHandler(openai_base_url_text, ButtonPressMask, False, popup_handler, NULL);
         Widget openai_model_label = XtVaCreateManagedWidget("Model ID:", xmLabelWidgetClass, settings_openai_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_base_url_text, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNalignment, XmALIGNMENT_BEGINNING, NULL);
