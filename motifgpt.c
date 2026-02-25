@@ -181,15 +181,31 @@ void append_to_conversation(const char* text) {
 void append_to_assistant_buffer(const char* text) {
     if (!text) return;
     size_t len = strlen(text);
-    if (current_assistant_response_len + len + 1 > current_assistant_response_capacity) {
-        current_assistant_response_capacity = (current_assistant_response_len + len + 1) * 2;
-        char *new_buf = realloc(current_assistant_response_buffer, current_assistant_response_capacity);
+
+    size_t new_len;
+    // Check if adding len + 1 to current length overflows
+    if (__builtin_add_overflow(current_assistant_response_len, len, &new_len) ||
+        __builtin_add_overflow(new_len, 1, &new_len)) {
+        fprintf(stderr, "Overflow detected in buffer length calculation.\n");
+        return;
+    }
+
+    if (new_len > current_assistant_response_capacity) {
+        size_t new_capacity;
+        // Check if doubling the needed size overflows
+        if (__builtin_mul_overflow(new_len, 2, &new_capacity)) {
+            // Fallback to exact fit if doubling overflows
+            new_capacity = new_len;
+        }
+
+        char *new_buf = realloc(current_assistant_response_buffer, new_capacity);
         if (!new_buf) {
             perror("realloc assistant_buffer"); free(current_assistant_response_buffer);
             current_assistant_response_buffer = NULL; current_assistant_response_len = 0; current_assistant_response_capacity = 0;
             return;
         }
         current_assistant_response_buffer = new_buf;
+        current_assistant_response_capacity = new_capacity;
     }
     memcpy(current_assistant_response_buffer + current_assistant_response_len, text, len);
     current_assistant_response_len += len;
