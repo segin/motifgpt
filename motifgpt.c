@@ -41,6 +41,7 @@
 #include <ctype.h>
 
 #include "disasterparty.h"
+#include "history.h"
 #include <curl/curl.h>
 
 // --- Configuration ---
@@ -108,9 +109,6 @@ bool assistant_is_replying = false;
 char current_assistant_prefix[64];
 bool prefix_already_added_for_current_reply = false;
 
-dp_message_t *chat_history = NULL;
-int chat_history_count = 0;
-int chat_history_capacity = 0;
 char *current_assistant_response_buffer = NULL;
 size_t current_assistant_response_len = 0;
 size_t current_assistant_response_capacity = 0;
@@ -138,8 +136,6 @@ static void settings_text_field_focus_in_cb(Widget, XtPointer, XtPointer);
 static void settings_text_field_focus_out_cb(Widget, XtPointer, XtPointer);
 void clear_chat_callback(Widget, XtPointer, XtPointer);
 void add_message_to_history(dp_message_role_t, const char*, const char*, const char*);
-void free_chat_history();
-void remove_oldest_history_messages(int);
 void *perform_llm_request_thread(void*);
 void initialize_dp_context();
 char* get_config_path(const char*);
@@ -295,14 +291,6 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
     }
 }
 
-void remove_oldest_history_messages(int count_to_remove) {
-    if (count_to_remove <= 0 || count_to_remove > chat_history_count) return;
-    for (int i = 0; i < count_to_remove; ++i) dp_free_messages(&chat_history[i], 1);
-    int remaining_count = chat_history_count - count_to_remove;
-    if (remaining_count > 0) memmove(chat_history, &chat_history[count_to_remove], remaining_count * sizeof(dp_message_t));
-    chat_history_count = remaining_count;
-}
-
 void add_message_to_history(dp_message_role_t role, const char* text_content, const char* img_mime_type, const char* img_base64_data) {
     int effective_max_history = history_limits_disabled ? INTERNAL_MAX_HISTORY_CAPACITY : current_max_history_messages;
     if (chat_history_count >= effective_max_history && effective_max_history > 0 && !history_limits_disabled ) {
@@ -341,14 +329,6 @@ void add_message_to_history(dp_message_role_t role, const char* text_content, co
     } else if (new_msg->parts) {
         free(new_msg->parts); new_msg->parts = NULL;
     } else if (!text_content && !img_base64_data && role == DP_ROLE_USER) { return; }
-}
-
-void free_chat_history() {
-    if (chat_history) {
-        dp_free_messages(chat_history, chat_history_count);
-        free(chat_history); chat_history = NULL;
-    }
-    chat_history_count = 0; chat_history_capacity = 0;
 }
 
 void *perform_llm_request_thread(void *arg) {
