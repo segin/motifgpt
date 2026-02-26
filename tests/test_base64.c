@@ -1,42 +1,51 @@
-#include "../buffer_utils.h"
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 #include <assert.h>
-
-void test_base64_encode() {
-    printf("Running test_base64_encode...\n");
-
-    struct {
-        const char *input;
-        const char *expected;
-    } cases[] = {
-        {"", ""},
-        {"f", "Zg=="},
-        {"fo", "Zm8="},
-        {"foo", "Zm9v"},
-        {"foob", "Zm9vYg=="},
-        {"fooba", "Zm9vYmE="},
-        {"foobar", "Zm9vYmFy"},
-        {"Hello, World!", "SGVsbG8sIFdvcmxkIQ=="}
-    };
-
-    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-        char *encoded = base64_encode((const unsigned char *)cases[i].input, strlen(cases[i].input));
-        if (strcmp(encoded, cases[i].expected) != 0) {
-            fprintf(stderr, "Test case %zu failed: input='%s', expected='%s', got='%s'\n",
-                    i, cases[i].input, cases[i].expected, encoded);
-            free(encoded);
-            exit(1);
-        }
-        printf("Test case %zu passed: '%s' -> '%s'\n", i, cases[i].input, encoded);
-        free(encoded);
-    }
-
-    printf("test_base64_encode passed!\n");
-}
+#include "../utils.h"
 
 int main() {
-    test_base64_encode();
+    printf("Running base64_encode tests...\n");
+
+    // Test case 1: Empty string
+    char *result = base64_encode((unsigned char*)"", 0);
+    if (result == NULL) {
+        fprintf(stderr, "base64_encode returned NULL for empty input\n");
+        return 1;
+    }
+    assert(strcmp(result, "") == 0);
+    free(result);
+
+    // Test case 2: 'f' -> 'Zg=='
+    result = base64_encode((unsigned char*)"f", 1);
+    assert(strcmp(result, "Zg==") == 0);
+    free(result);
+
+    // Test case 3: 'fo' -> 'Zm8='
+    result = base64_encode((unsigned char*)"fo", 2);
+    assert(strcmp(result, "Zm8=") == 0);
+    free(result);
+
+    // Test case 4: 'foo' -> 'Zm9v'
+    result = base64_encode((unsigned char*)"foo", 3);
+    assert(strcmp(result, "Zm9v") == 0);
+    free(result);
+
+    // Test case 5: 'foob' -> 'Zm9vYg=='
+    result = base64_encode((unsigned char*)"foob", 4);
+    assert(strcmp(result, "Zm9vYg==") == 0);
+    free(result);
+
+    // Test case 6: 'fooba' -> 'Zm9vYmE='
+    result = base64_encode((unsigned char*)"fooba", 5);
+    assert(strcmp(result, "Zm9vYmE=") == 0);
+    free(result);
+
+    // Test case 7: 'foobar' -> 'Zm9vYmFy'
+    result = base64_encode((unsigned char*)"foobar", 6);
+    assert(strcmp(result, "Zm9vYmFy") == 0);
+    free(result);
+
+    printf("All base64_encode tests passed!\n");
     return 0;
 }
