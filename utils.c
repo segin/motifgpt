@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+<<<<<<< HEAD
+=======
 #include <time.h>
 
 void generate_system_prompt(char *buffer, size_t buffer_size, const char *custom_prompt, bool append_default) {
@@ -30,11 +32,27 @@ void generate_system_prompt(char *buffer, size_t buffer_size, const char *custom
         }
     }
 }
+>>>>>>> main
 
 unsigned char* read_file_to_buffer(const char* filename, size_t* file_size) {
     FILE* f = fopen(filename, "rb");
     if (!f) { perror("fopen read_file"); return NULL; }
     fseek(f, 0, SEEK_END); long size = ftell(f);
+<<<<<<< HEAD
+    if (size < 0 || size > 20 * 1024 * 1024) {
+        fclose(f); fprintf(stderr, "File too large (max 20MB) or ftell error.\n"); return NULL;
+    }
+    *file_size = (size_t)size; fseek(f, 0, SEEK_SET);
+
+    // Handle empty file case or malloc(0) behavior
+    size_t alloc_size = (*file_size == 0) ? 1 : *file_size;
+    unsigned char* buffer = malloc(alloc_size);
+
+    if (!buffer) { fclose(f); perror("malloc read_file"); return NULL; }
+
+    if (*file_size > 0 && fread(buffer, 1, *file_size, f) != *file_size) {
+        fclose(f); free(buffer); fprintf(stderr, "fread error.\n"); return NULL;
+=======
     if (size < 0 || size > MAX_FILE_SIZE_BYTES) {
         fclose(f); fprintf(stderr, "File too large (max %dMB) or ftell error.\n", (int)(MAX_FILE_SIZE_BYTES / (1024 * 1024))); return NULL;
     }
@@ -45,8 +63,30 @@ unsigned char* read_file_to_buffer(const char* filename, size_t* file_size) {
         if (fread(buffer, 1, *file_size, f) != *file_size) {
             fclose(f); free(buffer); fprintf(stderr, "fread error.\n"); return NULL;
         }
+>>>>>>> main
     }
     fclose(f); return buffer;
+}
+
+const char* get_image_mime_type(const unsigned char* buffer, size_t len) {
+    if (!buffer || len == 0) return NULL;
+
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    if (len >= 8 && memcmp(buffer, "\x89PNG\r\n\x1a\n", 8) == 0) {
+        return "image/png";
+    }
+
+    // JPEG: FF D8
+    if (len >= 2 && memcmp(buffer, "\xff\xd8", 2) == 0) {
+        return "image/jpeg";
+    }
+
+    // GIF: GIF87a or GIF89a
+    if (len >= 6 && (memcmp(buffer, "GIF87a", 6) == 0 || memcmp(buffer, "GIF89a", 6) == 0)) {
+        return "image/gif";
+    }
+
+    return NULL;
 }
 
 char* base64_encode(const unsigned char *data, size_t input_length) {
@@ -68,3 +108,34 @@ char* base64_encode(const unsigned char *data, size_t input_length) {
     encoded_data[output_length] = '\0';
     return encoded_data;
 }
+<<<<<<< HEAD
+
+const char* get_image_mime_type(const unsigned char* buffer, size_t len) {
+    if (!buffer || len == 0) return NULL;
+
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    if (len >= 8 && memcmp(buffer, "\x89PNG\r\n\x1a\n", 8) == 0) {
+        return "image/png";
+    }
+
+    // JPEG: FF D8 FF
+    if (len >= 3 && memcmp(buffer, "\xff\xd8\xff", 3) == 0) {
+        return "image/jpeg";
+    }
+
+    // Also check for JPEG SOF0 markers if simpler check isn't enough, but FF D8 FF is standard start.
+    // Some JPEGs might start with FF D8 alone, followed by other markers.
+    // The most reliable simple check is FF D8.
+    if (len >= 2 && memcmp(buffer, "\xff\xd8", 2) == 0) {
+        return "image/jpeg";
+    }
+
+    // GIF: GIF87a or GIF89a
+    if (len >= 6 && (memcmp(buffer, "GIF87a", 6) == 0 || memcmp(buffer, "GIF89a", 6) == 0)) {
+        return "image/gif";
+    }
+
+    return NULL;
+}
+=======
+>>>>>>> main

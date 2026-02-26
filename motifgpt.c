@@ -928,16 +928,42 @@ void file_selection_ok_callback(Widget w, XtPointer client_data, XtPointer call_
     XmFileSelectionBoxCallbackStruct *cbs = (XmFileSelectionBoxCallbackStruct *)call_data;
     char *filename = NULL; XmStringGetLtoR(cbs->value, XmFONTLIST_DEFAULT_TAG, &filename);
     if (!filename || strlen(filename) == 0) { XtFree(filename); return; }
-    strncpy(attached_image_path, filename, PATH_MAX -1); attached_image_path[PATH_MAX-1] = '\0';
-    if (ends_with_ignore_case(filename, ".png")) snprintf(attached_image_mime_type, sizeof(attached_image_mime_type), "image/png");
-    else if (ends_with_ignore_case(filename, ".jpg") || ends_with_ignore_case(filename, ".jpeg")) snprintf(attached_image_mime_type, sizeof(attached_image_mime_type), "image/jpeg");
-    else if (ends_with_ignore_case(filename, ".gif")) snprintf(attached_image_mime_type, sizeof(attached_image_mime_type), "image/gif");
-    else { show_error_dialog("Unsupported image type (PNG, JPG, GIF)."); XtFree(filename); attached_image_path[0] = '\0'; return; }
-    size_t file_size; unsigned char *file_buffer = read_file_to_buffer(filename, &file_size); XtFree(filename);
-    if (!file_buffer) { show_error_dialog("Could not read image file."); attached_image_path[0] = '\0'; return; }
+
+    size_t file_size;
+    unsigned char *file_buffer = read_file_to_buffer(filename, &file_size);
+
+    if (!file_buffer) {
+        show_error_dialog("Could not read image file.");
+        XtFree(filename);
+        attached_image_path[0] = '\0';
+        return;
+    }
+
+    const char* mime_type = get_image_mime_type(file_buffer, file_size);
+    if (!mime_type) {
+        show_error_dialog("Unsupported image type or invalid file content (PNG, JPG, GIF required).");
+        free(file_buffer);
+        XtFree(filename);
+        attached_image_path[0] = '\0';
+        return;
+    }
+
+    strncpy(attached_image_path, filename, PATH_MAX -1);
+    attached_image_path[PATH_MAX-1] = '\0';
+    strncpy(attached_image_mime_type, mime_type, sizeof(attached_image_mime_type) - 1);
+    attached_image_mime_type[sizeof(attached_image_mime_type) - 1] = '\0';
+    XtFree(filename);
+
     if (attached_image_base64_data) free(attached_image_base64_data);
-    attached_image_base64_data = base64_encode(file_buffer, file_size); free(file_buffer);
-    if (!attached_image_base64_data) { show_error_dialog("Could not Base64 encode image."); attached_image_path[0] = '\0'; return; }
+    attached_image_base64_data = base64_encode(file_buffer, file_size);
+    free(file_buffer);
+
+    if (!attached_image_base64_data) {
+        show_error_dialog("Could not Base64 encode image.");
+        attached_image_path[0] = '\0';
+        return;
+    }
+
     char status_msg[PATH_MAX + 50];
     char path_copy[PATH_MAX]; strncpy(path_copy, attached_image_path, PATH_MAX); path_copy[PATH_MAX-1] = '\0';
     snprintf(status_msg, sizeof(status_msg), "[Image ready: %s]", basename(path_copy));
