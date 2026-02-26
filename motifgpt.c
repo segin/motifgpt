@@ -170,7 +170,6 @@ static int ends_with_ignore_case(const char *str, const char *suffix);
 void clear_chat_callback(Widget, XtPointer, XtPointer);
 void *perform_llm_request_thread(void*);
 void initialize_dp_context();
-int ensure_config_dir_exists();
 void load_settings();
 void save_settings();
 void attach_image_callback(Widget, XtPointer, XtPointer);
@@ -722,29 +721,6 @@ Widget create_text_popup_menu(Widget parent_for_menu_shell) {
     XmStringFree(label_cs); XmStringFree(accel_cs);
 
     return menu;
-}
-
-int ensure_config_dir_exists() {
-    char *base_dir_path_ptr = get_config_path(""); if (!base_dir_path_ptr) return -1;
-    char base_dir_path[PATH_MAX]; strncpy(base_dir_path, base_dir_path_ptr, PATH_MAX -1); base_dir_path[PATH_MAX-1] = '\0';
-    if (base_dir_path[strlen(base_dir_path)-1] == '/') base_dir_path[strlen(base_dir_path)-1] = '\0';
-    struct stat st = {0};
-    if (stat(base_dir_path, &st) == -1) {
-        if (mkdir(base_dir_path, CONFIG_DIR_MODE) == -1 && errno != EEXIST) {
-            char err_msg[PATH_MAX + 100]; snprintf(err_msg, sizeof(err_msg), "mkdir base config dir: %s", base_dir_path);
-            perror(err_msg); return -1;
-        }
-        printf("Created config directory: %s\n", base_dir_path);
-    }
-    char cache_dir_full_path[PATH_MAX];
-    snprintf(cache_dir_full_path, sizeof(cache_dir_full_path), "%s/%s", base_dir_path, CACHE_DIR_NAME);
-    if (stat(cache_dir_full_path, &st) == -1) {
-        if (mkdir(cache_dir_full_path, CONFIG_DIR_MODE) == -1 && errno != EEXIST) {
-            char err_msg[PATH_MAX + 100]; snprintf(err_msg, sizeof(err_msg), "mkdir cache dir: %s", cache_dir_full_path);
-            perror(err_msg);
-        } else { printf("Created cache directory: %s\n", cache_dir_full_path); }
-    }
-    return 0;
 }
 
 void load_settings() {

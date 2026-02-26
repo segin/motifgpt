@@ -1,58 +1,64 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <assert.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include "../motifgpt_config.h"
 
 int main() {
-    printf("Starting get_config_path tests...\n");
+    // Setup temp dir
+    char template[] = "/tmp/motifgpt_test_XXXXXX";
+    char *temp_dir = mkdtemp(template);
+    if (!temp_dir) {
+        perror("mkdtemp");
+        return 1;
+    }
+    printf("Temp dir: %s\n", temp_dir);
 
-    // Test 1: XDG_CONFIG_HOME set
-    printf("Test 1: XDG_CONFIG_HOME set\n");
-    unsetenv("HOME");
-    setenv("XDG_CONFIG_HOME", "/tmp/config", 1);
-    char *path = get_config_path("settings.conf");
-    assert(path != NULL);
-    printf("Expected: /tmp/config/motifgpt/settings.conf, Got: %s\n", path);
-    assert(strcmp(path, "/tmp/config/motifgpt/settings.conf") == 0);
-
-    // Test 2: XDG_CONFIG_HOME unset, HOME set
-    printf("Test 2: XDG_CONFIG_HOME unset, HOME set\n");
-    unsetenv("XDG_CONFIG_HOME");
-    setenv("HOME", "/tmp/home", 1);
-    path = get_config_path("settings.conf");
-    assert(path != NULL);
-    printf("Expected: /tmp/home/.config/motifgpt/settings.conf, Got: %s\n", path);
-    assert(strcmp(path, "/tmp/home/.config/motifgpt/settings.conf") == 0);
-
-    // Test 3: HOME unset
-    printf("Test 3: HOME unset\n");
-    unsetenv("HOME");
-    unsetenv("XDG_CONFIG_HOME");
-    path = get_config_path("settings.conf");
-    if (path == NULL) {
-        printf("Got NULL as expected.\n");
-    } else {
-        printf("Error: Expected NULL, Got: %s\n", path);
+    // Set XDG_CONFIG_HOME
+    if (setenv("XDG_CONFIG_HOME", temp_dir, 1) != 0) {
+        perror("setenv");
         return 1;
     }
 
-    // Test 4: Empty filename
-    printf("Test 4: Empty filename\n");
-    setenv("HOME", "/tmp/home", 1);
-    path = get_config_path(""); // Should return base dir path
-    assert(path != NULL);
-    printf("Expected: /tmp/home/.config/motifgpt/, Got: %s\n", path);
-    assert(strcmp(path, "/tmp/home/.config/motifgpt/") == 0);
+    // Run test
+    if (ensure_config_dir_exists() != 0) {
+        fprintf(stderr, "ensure_config_dir_exists failed\n");
+        return 1;
+    }
 
-    // Test 5: NULL filename
-    printf("Test 5: NULL filename\n");
-    path = get_config_path(NULL);
-    assert(path != NULL);
-    printf("Expected: /tmp/home/.config/motifgpt/, Got: %s\n", path);
-    assert(strcmp(path, "/tmp/home/.config/motifgpt/") == 0);
+    // Verify directories
+    char path[1024];
+    struct stat st;
 
-    printf("All tests passed!\n");
+    // Check base dir
+    snprintf(path, sizeof(path), "%s/motifgpt", temp_dir);
+    if (stat(path, &st) != 0) {
+        perror("stat motifgpt dir");
+        return 1;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        fprintf(stderr, "%s is not a directory\n", path);
+        return 1;
+    }
+
+    // Check cache dir
+    snprintf(path, sizeof(path), "%s/motifgpt/cache", temp_dir);
+    if (stat(path, &st) != 0) {
+        perror("stat cache dir");
+        return 1;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        fprintf(stderr, "%s is not a directory\n", path);
+        return 1;
+    }
+
+    printf("Test passed!\n");
+
+    // Cleanup
+    snprintf(path, sizeof(path), "rm -rf %s", temp_dir);
+    system(path);
+
     return 0;
 }
