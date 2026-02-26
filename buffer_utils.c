@@ -1,41 +1,70 @@
 #include "buffer_utils.h"
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <stdint.h>
 
-char* base64_encode(const unsigned char *data, size_t input_length) {
-    const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    size_t output_length = 4 * ((input_length + 2) / 3);
-    char *encoded_data = malloc(output_length + 1);
-    if (!encoded_data) { perror("malloc base64"); return NULL; }
-    for (size_t i = 0, j = 0; i < input_length;) {
-        uint32_t octet_a = i < input_length ? data[i++] : 0;
-        uint32_t octet_b = i < input_length ? data[i++] : 0;
-        uint32_t octet_c = i < input_length ? data[i++] : 0;
-        uint32_t triple = (octet_a << 16) + (octet_b << 8) + octet_c;
-        encoded_data[j++] = base64_chars[(triple >> 18) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 12) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 6) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 0) & 0x3F];
+char *current_assistant_response_buffer = NULL;
+size_t current_assistant_response_len = 0;
+size_t current_assistant_response_capacity = 0;
+
+void init_assistant_buffer() {
+    current_assistant_response_capacity = 1024;
+    current_assistant_response_buffer = malloc(current_assistant_response_capacity);
+    if (!current_assistant_response_buffer) {
+        perror("malloc assistant_buffer");
+        exit(1);
     }
-    for (size_t i = 0; i < (3 - input_length % 3) % 3; i++) encoded_data[output_length - 1 - i] = '=';
-    encoded_data[output_length] = '\0';
-    return encoded_data;
+    current_assistant_response_buffer[0] = '\0';
+    current_assistant_response_len = 0;
 }
 
-unsigned char* read_file_to_buffer(const char* filename, size_t* file_size) {
-    FILE* f = fopen(filename, "rb");
-    if (!f) { perror("fopen read_file"); return NULL; }
-    fseek(f, 0, SEEK_END); long size = ftell(f);
-    if (size < 0 || size > 20 * 1024 * 1024) {
-        fclose(f); fprintf(stderr, "File too large (max 20MB) or ftell error.\n"); return NULL;
+void free_assistant_buffer() {
+    if (current_assistant_response_buffer) {
+        free(current_assistant_response_buffer);
+        current_assistant_response_buffer = NULL;
     }
-    *file_size = (size_t)size; fseek(f, 0, SEEK_SET);
-    unsigned char* buffer = malloc(*file_size);
-    if (!buffer) { fclose(f); perror("malloc read_file"); return NULL; }
-    if (fread(buffer, 1, *file_size, f) != *file_size) {
-        fclose(f); free(buffer); fprintf(stderr, "fread error.\n"); return NULL;
+    current_assistant_response_len = 0;
+    current_assistant_response_capacity = 0;
+}
+
+void reset_assistant_buffer() {
+    if (current_assistant_response_buffer) {
+        current_assistant_response_buffer[0] = '\0';
     }
-    fclose(f); return buffer;
+    current_assistant_response_len = 0;
+}
+
+void append_to_assistant_buffer(const char* text) {
+    if (!text) return;
+    size_t len = strlen(text);
+    size_t required_capacity;
+
+    if (__builtin_add_overflow(current_assistant_response_len, len, &required_capacity) ||
+        __builtin_add_overflow(required_capacity, 1, &required_capacity)) {
+        fprintf(stderr, "Assistant response buffer overflow averted (addition).\n");
+        return;
+    }
+
+    if (required_capacity > current_assistant_response_capacity) {
+        size_t new_capacity;
+        if (__builtin_mul_overflow(required_capacity, 2, &new_capacity)) {
+            new_capacity = required_capacity;
+        }
+
+        char *new_buf = realloc(current_assistant_response_buffer, new_capacity);
+        if (!new_buf) {
+            perror("realloc assistant_buffer");
+            free(current_assistant_response_buffer);
+            current_assistant_response_buffer = NULL;
+            current_assistant_response_len = 0;
+            current_assistant_response_capacity = 0;
+            return;
+        }
+        current_assistant_response_buffer = new_buf;
+        current_assistant_response_capacity = new_capacity;
+    }
+    memcpy(current_assistant_response_buffer + current_assistant_response_len, text, len);
+    current_assistant_response_len += len;
+    current_assistant_response_buffer[current_assistant_response_len] = '\0';
 }
