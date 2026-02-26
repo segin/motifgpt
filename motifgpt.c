@@ -48,6 +48,7 @@
 #include "motifgpt_config.h"
 #include "motifgpt_history.h"
 #include "motifgpt_chat.h"
+#include "buffer_utils.h"
 
 // --- Configuration ---
 #define DEFAULT_PROVIDER DP_PROVIDER_GOOGLE_GEMINI
@@ -1628,10 +1629,7 @@ int main(int argc, char **argv) {
     }
     load_settings();
 
-    current_assistant_response_capacity = 1024;
-    current_assistant_response_buffer = malloc(current_assistant_response_capacity);
-    if (!current_assistant_response_buffer) { perror("malloc assistant_buffer"); return 1; }
-    current_assistant_response_buffer[0] = '\0';
+    init_assistant_buffer();
 
     if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) { fprintf(stderr, "Fatal: curl_global_init failed.\n"); return 1; }
     initialize_dp_context();
@@ -1671,7 +1669,7 @@ int main(int argc, char **argv) {
     append_to_conversation("Welcome to MotifGPT! Type message, Shift+Enter for newline, Enter to send.\n");
     XtAppMainLoop(app_context);
 
-    if (current_assistant_response_buffer) free(current_assistant_response_buffer);
+    free_assistant_buffer();
     free_chat_history();
     if (dp_ctx) dp_destroy_context(dp_ctx);
     curl_global_cleanup();
