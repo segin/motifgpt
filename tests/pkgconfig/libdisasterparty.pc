@@ -1,0 +1,10 @@
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+includedir=${prefix}/tests/include
+libdir=${prefix}/tests
+
+Name: libdisasterparty
+Description: Mock libdisasterparty
+Version: 1.0.0
+Cflags: -I${includedir}
+Libs: -L${libdir} -ldisasterparty
