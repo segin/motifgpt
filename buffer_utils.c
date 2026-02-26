@@ -68,25 +68,3 @@ void append_to_assistant_buffer(const char* text) {
     current_assistant_response_len += len;
     current_assistant_response_buffer[current_assistant_response_len] = '\0';
 }
-
-unsigned char* read_file_to_buffer(const char* filename, size_t* file_size) {
-    FILE* f = fopen(filename, "rb");
-    if (!f) { perror("fopen read_file"); return NULL; }
-    fseek(f, 0, SEEK_END); long size = ftell(f);
-    if (size < 0) {
-        fclose(f); return NULL;
-    }
-    if (size > 20 * 1024 * 1024) {
-        fclose(f); fprintf(stderr, "File too large (max 20MB)\n"); return NULL;
-    }
-    *file_size = (size_t)size; fseek(f, 0, SEEK_SET);
-    size_t alloc_size = (*file_size == 0) ? 1 : *file_size;
-    unsigned char* buffer = malloc(alloc_size);
-    if (!buffer) { fclose(f); perror("malloc read_file"); return NULL; }
-    if (*file_size > 0) {
-        if (fread(buffer, 1, *file_size, f) != *file_size) {
-            fclose(f); free(buffer); fprintf(stderr, "fread error.\n"); return NULL;
-        }
-    }
-    fclose(f); return buffer;
-}
