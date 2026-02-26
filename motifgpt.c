@@ -1069,6 +1069,16 @@ void settings_tab_change_callback(Widget w, XtPointer client_data, XtPointer cal
     if (settings_current_tab_content) XtManageChild(settings_current_tab_content);
 }
 
+static void update_settings_text_field(Widget tf, const char *value, const char *placeholder) {
+    if (strlen(value) == 0) {
+        XmTextFieldSetString(tf, (char*)placeholder);
+        XtVaSetValues(tf, XmNforeground, grey_fg_color, NULL);
+    } else {
+        XmTextFieldSetString(tf, (char*)value);
+        XtVaSetValues(tf, XmNforeground, normal_fg_color, NULL);
+    }
+}
+
 void populate_settings_dialog() {
     XmToggleButtonSetState(provider_gemini_rb, current_api_provider == DP_PROVIDER_GOOGLE_GEMINI, False);
     XmToggleButtonSetState(provider_openai_rb, current_api_provider == DP_PROVIDER_OPENAI_COMPATIBLE, False);
@@ -1087,61 +1097,19 @@ void populate_settings_dialog() {
     XtSetSensitive(history_length_text, !history_limits_disabled);
 
     // Gemini
-    if (strlen(current_gemini_api_key) == 0) {
-        XmTextFieldSetString(gemini_api_key_text, DEFAULT_GEMINI_KEY_PLACEHOLDER);
-        XtVaSetValues(gemini_api_key_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(gemini_api_key_text, current_gemini_api_key);
-        XtVaSetValues(gemini_api_key_text, XmNforeground, normal_fg_color, NULL);
-    }
-    if (strlen(current_gemini_model) == 0) {
-        XmTextFieldSetString(gemini_model_text, DEFAULT_GEMINI_MODEL);
-        XtVaSetValues(gemini_model_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(gemini_model_text, current_gemini_model);
-        XtVaSetValues(gemini_model_text, XmNforeground, normal_fg_color, NULL);
-    }
+    update_settings_text_field(gemini_api_key_text, current_gemini_api_key, DEFAULT_GEMINI_KEY_PLACEHOLDER);
+    update_settings_text_field(gemini_model_text, current_gemini_model, DEFAULT_GEMINI_MODEL);
     XmListDeleteAllItems(gemini_model_list);
 
     // OpenAI
-    if (strlen(current_openai_api_key) == 0) {
-        XmTextFieldSetString(openai_api_key_text, DEFAULT_OPENAI_KEY_PLACEHOLDER);
-        XtVaSetValues(openai_api_key_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(openai_api_key_text, current_openai_api_key);
-        XtVaSetValues(openai_api_key_text, XmNforeground, normal_fg_color, NULL);
-    }
-    if (strlen(current_openai_model) == 0) {
-        XmTextFieldSetString(openai_model_text, DEFAULT_OPENAI_MODEL);
-        XtVaSetValues(openai_model_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(openai_model_text, current_openai_model);
-        XtVaSetValues(openai_model_text, XmNforeground, normal_fg_color, NULL);
-    }
-    if (strlen(current_openai_base_url) == 0) {
-        XmTextFieldSetString(openai_base_url_text, DEFAULT_OPENAI_BASE_URL);
-        XtVaSetValues(openai_base_url_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(openai_base_url_text, current_openai_base_url);
-        XtVaSetValues(openai_base_url_text, XmNforeground, normal_fg_color, NULL);
-    }
+    update_settings_text_field(openai_api_key_text, current_openai_api_key, DEFAULT_OPENAI_KEY_PLACEHOLDER);
+    update_settings_text_field(openai_model_text, current_openai_model, DEFAULT_OPENAI_MODEL);
+    update_settings_text_field(openai_base_url_text, current_openai_base_url, DEFAULT_OPENAI_BASE_URL);
     XmListDeleteAllItems(openai_model_list);
 
     // Anthropic
-    if (strlen(current_anthropic_api_key) == 0) {
-        XmTextFieldSetString(anthropic_api_key_text, DEFAULT_ANTHROPIC_KEY_PLACEHOLDER);
-        XtVaSetValues(anthropic_api_key_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(anthropic_api_key_text, current_anthropic_api_key);
-        XtVaSetValues(anthropic_api_key_text, XmNforeground, normal_fg_color, NULL);
-    }
-    if (strlen(current_anthropic_model) == 0) {
-        XmTextFieldSetString(anthropic_model_text, DEFAULT_ANTHROPIC_MODEL);
-        XtVaSetValues(anthropic_model_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(anthropic_model_text, current_anthropic_model);
-        XtVaSetValues(anthropic_model_text, XmNforeground, normal_fg_color, NULL);
-    }
+    update_settings_text_field(anthropic_api_key_text, current_anthropic_api_key, DEFAULT_ANTHROPIC_KEY_PLACEHOLDER);
+    update_settings_text_field(anthropic_model_text, current_anthropic_model, DEFAULT_ANTHROPIC_MODEL);
     XmListDeleteAllItems(anthropic_model_list);
 }
 
