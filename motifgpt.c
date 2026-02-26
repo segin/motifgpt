@@ -27,6 +27,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -204,6 +205,13 @@ void append_to_assistant_buffer(const char* text) {
             new_capacity = SIZE_MAX;
         }
         char *new_buf = realloc(current_assistant_response_buffer, new_capacity);
+        if (!new_buf) {
+            // If doubling failed, try to allocate just what we need
+            if (new_capacity > needed) {
+                new_capacity = needed;
+                new_buf = realloc(current_assistant_response_buffer, new_capacity);
+            }
+        }
         if (!new_buf) {
             perror("realloc assistant_buffer"); free(current_assistant_response_buffer);
             current_assistant_response_buffer = NULL; current_assistant_response_len = 0; current_assistant_response_capacity = 0;
