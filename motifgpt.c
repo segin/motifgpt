@@ -64,6 +64,26 @@
 #define CONFIG_FILE_NAME "settings.conf"
 #define CACHE_DIR_NAME "cache"
 
+#define KEY_PROVIDER "provider"
+#define KEY_GEMINI_API_KEY "gemini_api_key"
+#define KEY_GEMINI_MODEL "gemini_model"
+#define KEY_OPENAI_API_KEY "openai_api_key"
+#define KEY_OPENAI_MODEL "openai_model"
+#define KEY_OPENAI_BASE_URL "openai_base_url"
+#define KEY_ANTHROPIC_API_KEY "anthropic_api_key"
+#define KEY_ANTHROPIC_MODEL "anthropic_model"
+#define KEY_MAX_HISTORY "max_history"
+#define KEY_SYSTEM_PROMPT "system_prompt"
+#define KEY_HISTORY_LIMITS_DISABLED "history_limits_disabled"
+#define KEY_ENTER_SENDS_MESSAGE "enter_sends_message"
+#define KEY_APPEND_DEFAULT_SYSTEM_PROMPT "append_default_system_prompt"
+
+#define VAL_PROVIDER_GEMINI "gemini"
+#define VAL_PROVIDER_OPENAI "openai"
+#define VAL_PROVIDER_ANTHROPIC "anthropic"
+#define VAL_TRUE "true"
+#define VAL_FALSE "false"
+
 // UI Spacing
 #define UI_SPACING_SMALL 2
 #define UI_SPACING_MEDIUM 5
@@ -879,22 +899,22 @@ void load_settings() {
     while (fgets(line, sizeof(line), fp)) {
         char *key = strtok(line, "="); char *value = strtok(NULL, "\n");
         if (key && value) {
-            if (strcmp(key, "provider") == 0) {
-                if (strcmp(value, "gemini") == 0) current_api_provider = DP_PROVIDER_GOOGLE_GEMINI;
-                else if (strcmp(value, "openai") == 0) current_api_provider = DP_PROVIDER_OPENAI_COMPATIBLE;
-                else if (strcmp(value, "anthropic") == 0) current_api_provider = DP_PROVIDER_ANTHROPIC;
-            } else if (strcmp(key, "gemini_api_key") == 0) snprintf(current_gemini_api_key, sizeof(current_gemini_api_key), "%s", value);
-            else if (strcmp(key, "gemini_model") == 0) snprintf(current_gemini_model, sizeof(current_gemini_model), "%s", value);
-            else if (strcmp(key, "openai_api_key") == 0) snprintf(current_openai_api_key, sizeof(current_openai_api_key), "%s", value);
-            else if (strcmp(key, "openai_model") == 0) snprintf(current_openai_model, sizeof(current_openai_model), "%s", value);
-            else if (strcmp(key, "openai_base_url") == 0) snprintf(current_openai_base_url, sizeof(current_openai_base_url), "%s", value);
-            else if (strcmp(key, "anthropic_api_key") == 0) snprintf(current_anthropic_api_key, sizeof(current_anthropic_api_key), "%s", value);
-            else if (strcmp(key, "anthropic_model") == 0) snprintf(current_anthropic_model, sizeof(current_anthropic_model), "%s", value);
-            else if (strcmp(key, "max_history") == 0) current_max_history_messages = atoi(value);
-            else if (strcmp(key, "system_prompt") == 0) snprintf(current_system_prompt, sizeof(current_system_prompt), "%s", value);
-            else if (strcmp(key, "history_limits_disabled") == 0) history_limits_disabled = (strcmp(value, "true") == 0);
-            else if (strcmp(key, "enter_sends_message") == 0) enter_key_sends_message = (strcmp(value, "true") == 0);
-
+            if (strcmp(key, KEY_PROVIDER) == 0) {
+                if (strcmp(value, VAL_PROVIDER_GEMINI) == 0) current_api_provider = DP_PROVIDER_GOOGLE_GEMINI;
+                else if (strcmp(value, VAL_PROVIDER_OPENAI) == 0) current_api_provider = DP_PROVIDER_OPENAI_COMPATIBLE;
+                else if (strcmp(value, VAL_PROVIDER_ANTHROPIC) == 0) current_api_provider = DP_PROVIDER_ANTHROPIC;
+            } else if (strcmp(key, KEY_GEMINI_API_KEY) == 0) snprintf(current_gemini_api_key, sizeof(current_gemini_api_key), "%s", value);
+            else if (strcmp(key, KEY_GEMINI_MODEL) == 0) snprintf(current_gemini_model, sizeof(current_gemini_model), "%s", value);
+            else if (strcmp(key, KEY_OPENAI_API_KEY) == 0) snprintf(current_openai_api_key, sizeof(current_openai_api_key), "%s", value);
+            else if (strcmp(key, KEY_OPENAI_MODEL) == 0) snprintf(current_openai_model, sizeof(current_openai_model), "%s", value);
+            else if (strcmp(key, KEY_OPENAI_BASE_URL) == 0) snprintf(current_openai_base_url, sizeof(current_openai_base_url), "%s", value);
+            else if (strcmp(key, KEY_ANTHROPIC_API_KEY) == 0) snprintf(current_anthropic_api_key, sizeof(current_anthropic_api_key), "%s", value);
+            else if (strcmp(key, KEY_ANTHROPIC_MODEL) == 0) snprintf(current_anthropic_model, sizeof(current_anthropic_model), "%s", value);
+            else if (strcmp(key, KEY_MAX_HISTORY) == 0) current_max_history_messages = atoi(value);
+            else if (strcmp(key, KEY_SYSTEM_PROMPT) == 0) snprintf(current_system_prompt, sizeof(current_system_prompt), "%s", value);
+            else if (strcmp(key, KEY_HISTORY_LIMITS_DISABLED) == 0) history_limits_disabled = (strcmp(value, VAL_TRUE) == 0);
+            else if (strcmp(key, KEY_ENTER_SENDS_MESSAGE) == 0) enter_key_sends_message = (strcmp(value, VAL_TRUE) == 0);
+            else if (strcmp(key, KEY_APPEND_DEFAULT_SYSTEM_PROMPT) == 0) append_default_system_prompt = (strcmp(value, VAL_TRUE) == 0);
         }
     }
     fclose(fp); printf("Settings loaded from %s\n", settings_file);
@@ -916,24 +936,24 @@ void save_settings() {
     if (!fp) {
         perror("fdopen settings file"); close(fd); return;
     }
-    const char* provider_str = "gemini";
-    if (current_api_provider == DP_PROVIDER_OPENAI_COMPATIBLE) provider_str = "openai";
-    else if (current_api_provider == DP_PROVIDER_ANTHROPIC) provider_str = "anthropic";
-    fprintf(fp, "provider=%s\n", provider_str);
+    const char* provider_str = VAL_PROVIDER_GEMINI;
+    if (current_api_provider == DP_PROVIDER_OPENAI_COMPATIBLE) provider_str = VAL_PROVIDER_OPENAI;
+    else if (current_api_provider == DP_PROVIDER_ANTHROPIC) provider_str = VAL_PROVIDER_ANTHROPIC;
+    fprintf(fp, "%s=%s\n", KEY_PROVIDER, provider_str);
 
-    fprintf(fp, "gemini_api_key=%s\n", current_gemini_api_key);
-    fprintf(fp, "gemini_model=%s\n", current_gemini_model);
-    fprintf(fp, "openai_api_key=%s\n", current_openai_api_key);
-    fprintf(fp, "openai_model=%s\n", current_openai_model);
-    fprintf(fp, "openai_base_url=%s\n", current_openai_base_url);
-    fprintf(fp, "anthropic_api_key=%s\n", current_anthropic_api_key);
-    fprintf(fp, "anthropic_model=%s\n", current_anthropic_model);
+    fprintf(fp, "%s=%s\n", KEY_GEMINI_API_KEY, current_gemini_api_key);
+    fprintf(fp, "%s=%s\n", KEY_GEMINI_MODEL, current_gemini_model);
+    fprintf(fp, "%s=%s\n", KEY_OPENAI_API_KEY, current_openai_api_key);
+    fprintf(fp, "%s=%s\n", KEY_OPENAI_MODEL, current_openai_model);
+    fprintf(fp, "%s=%s\n", KEY_OPENAI_BASE_URL, current_openai_base_url);
+    fprintf(fp, "%s=%s\n", KEY_ANTHROPIC_API_KEY, current_anthropic_api_key);
+    fprintf(fp, "%s=%s\n", KEY_ANTHROPIC_MODEL, current_anthropic_model);
 
-    fprintf(fp, "max_history=%d\n", current_max_history_messages);
-    fprintf(fp, "system_prompt=%s\n", current_system_prompt);
-    fprintf(fp, "append_default_system_prompt=%s\n", append_default_system_prompt ? "true" : "false");
-    fprintf(fp, "history_limits_disabled=%s\n", history_limits_disabled ? "true" : "false");
-    fprintf(fp, "enter_sends_message=%s\n", enter_key_sends_message ? "true" : "false");
+    fprintf(fp, "%s=%d\n", KEY_MAX_HISTORY, current_max_history_messages);
+    fprintf(fp, "%s=%s\n", KEY_SYSTEM_PROMPT, current_system_prompt);
+    fprintf(fp, "%s=%s\n", KEY_APPEND_DEFAULT_SYSTEM_PROMPT, append_default_system_prompt ? VAL_TRUE : VAL_FALSE);
+    fprintf(fp, "%s=%s\n", KEY_HISTORY_LIMITS_DISABLED, history_limits_disabled ? VAL_TRUE : VAL_FALSE);
+    fprintf(fp, "%s=%s\n", KEY_ENTER_SENDS_MESSAGE, enter_key_sends_message ? VAL_TRUE : VAL_FALSE);
     fclose(fp); printf("Settings saved to %s\n", settings_file);
 }
 
