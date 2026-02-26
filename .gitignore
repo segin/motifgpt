@@ -14,17 +14,11 @@ configure
 depcomp
 install-sh
 ltmain.sh
-missing
-test-driver
 Makefile
 Makefile.in
 stamp-h1
 m4/
-!m4/ax_pthread.m4
-.deps/
-.dirstamp
 
 # Object files and executables
 *.o
 motifgpt
-test_save_settings
