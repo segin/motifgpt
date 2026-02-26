@@ -3,6 +3,8 @@
 
 #include <stddef.h>
 
+#define MAX_FILE_SIZE_BYTES (20 * 1024 * 1024)
+
 /**
  * Reads a file into a newly allocated buffer.
  * @param filename Path to the file.
