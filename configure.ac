@@ -4,7 +4,6 @@ AM_INIT_AUTOMAKE([foreign -Wall -Werror subdir-objects])
 AC_PROG_CC
 
 # Checks for libraries.
-m4_include([m4/ax_pthread.m4])
 AX_PTHREAD
 
 AC_PATH_XTRA

@@ -190,6 +190,7 @@ static void numeric_verify_cb(Widget, XtPointer, XtPointer);
 void cut_callback(Widget, XtPointer, XtPointer); void copy_callback(Widget, XtPointer, XtPointer);
 void paste_callback(Widget, XtPointer, XtPointer); void select_all_callback(Widget, XtPointer, XtPointer);
 void settings_callback(Widget, XtPointer, XtPointer); void settings_tab_change_callback(Widget, XtPointer, XtPointer);
+Boolean apply_settings_safe();
 void settings_apply_callback(Widget, XtPointer, XtPointer); void settings_ok_callback(Widget, XtPointer, XtPointer);
 void settings_cancel_callback(Widget, XtPointer, XtPointer); void settings_get_models_callback(Widget, XtPointer, XtPointer);
 void *perform_get_models_thread(void*); void settings_use_selected_model_callback(Widget, XtPointer, XtPointer);
@@ -364,11 +365,21 @@ void *perform_llm_request_thread(void *arg) {
         thread_data->config.system_prompt = NULL;
     }
 
-    int ret = dp_perform_streaming_completion(dp_ctx, &thread_data->config, stream_handler, NULL, &response_status);
+    pthread_mutex_lock(&dp_mutex);
+    int ret = -1;
+    if (dp_ctx) {
+        ret = dp_perform_streaming_completion(dp_ctx, &thread_data->config, stream_handler, NULL, &response_status);
+    }
+    pthread_mutex_unlock(&dp_mutex);
+
     if (ret != 0) {
         char err_buf[1024];
-        snprintf(err_buf, sizeof(err_buf), "LLM Request Failed (Thread) (HTTP %ld): %s",
+        if (ret == -1 && response_status.http_status_code == 0) {
+             snprintf(err_buf, sizeof(err_buf), "LLM Request Failed: Context unavailable.");
+        } else {
+             snprintf(err_buf, sizeof(err_buf), "LLM Request Failed (Thread) (HTTP %ld): %s",
                  response_status.http_status_code, response_status.error_message ? response_status.error_message : "DP error in thread.");
+        }
         write_pipe_message(PIPE_MSG_ERROR, err_buf);
     }
     dp_free_response_content(&response_status);
@@ -397,11 +408,14 @@ void start_llm_request() {
         if (!attached_image_base64_data) return;
     }
 
+    pthread_mutex_lock(&dp_mutex);
     if (!dp_ctx) {
         show_error_dialog("LLM context not initialized. Please check API Key and Model ID in Settings.");
         if(input_string_raw) XtFree(input_string_raw);
+        pthread_mutex_unlock(&dp_mutex);
         return;
     }
+    pthread_mutex_unlock(&dp_mutex);
 
     char display_msg_text_part[1024] = "";
     if (input_string_raw) {
@@ -489,7 +503,10 @@ void send_message_callback(Widget w, XtPointer client_data, XtPointer call_data)
 void quit_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     printf("Exiting MotifGPT...\n"); save_settings(); free_chat_history();
     if (current_assistant_response_buffer) free(current_assistant_response_buffer);
-    if (dp_ctx) dp_destroy_context(dp_ctx); curl_global_cleanup();
+    pthread_mutex_lock(&dp_mutex);
+    if (dp_ctx) dp_destroy_context(dp_ctx);
+    pthread_mutex_unlock(&dp_mutex);
+    curl_global_cleanup();
     if (pipe_fds[0] != -1) close(pipe_fds[0]); if (pipe_fds[1] != -1) close(pipe_fds[1]);
     if (settings_shell) XtDestroyWidget(settings_shell);
     XtDestroyApplicationContext(XtWidgetToApplicationContext(app_shell)); exit(0);
@@ -1149,12 +1166,26 @@ void retrieve_settings_from_dialog() {
     append_default_system_prompt = XmToggleButtonGetState(append_prompt_toggle);
 }
 
+Boolean apply_settings_safe() {
+    if (pthread_mutex_trylock(&dp_mutex) != 0) {
+        show_error_dialog("Cannot apply settings while an LLM request is in progress.");
+        return False;
+    }
+    retrieve_settings_from_dialog();
+    initialize_dp_context_unsafe();
+    save_settings();
+    pthread_mutex_unlock(&dp_mutex);
+    return True;
+}
+
 void settings_apply_callback(Widget w, XtPointer client_data, XtPointer call_data) {
-    retrieve_settings_from_dialog(); initialize_dp_context(); save_settings();
+    apply_settings_safe();
 }
 
 void settings_ok_callback(Widget w, XtPointer client_data, XtPointer call_data) {
-    settings_apply_callback(w, client_data, call_data); XtUnmanageChild(settings_shell);
+    if (apply_settings_safe()) {
+        XtUnmanageChild(settings_shell);
+    }
 }
 
 void settings_cancel_callback(Widget w, XtPointer client_data, XtPointer call_data) {
