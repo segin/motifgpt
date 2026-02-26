@@ -27,6 +27,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -42,6 +43,7 @@
 
 #include "disasterparty.h"
 #include <curl/curl.h>
+#include "utils.h"
 
 // --- Configuration ---
 #define DEFAULT_PROVIDER DP_PROVIDER_GOOGLE_GEMINI
@@ -142,6 +144,7 @@ void free_chat_history();
 void remove_oldest_history_messages(int);
 void *perform_llm_request_thread(void*);
 void initialize_dp_context();
+void generate_system_prompt(char *, size_t, const char *, Boolean);
 char* get_config_path(const char*);
 int ensure_config_dir_exists();
 void load_settings();
@@ -153,6 +156,8 @@ void save_chat_as_callback(Widget, XtPointer, XtPointer);
 void file_selection_open_ok_callback(Widget, XtPointer, XtPointer);
 void file_selection_save_as_ok_callback(Widget, XtPointer, XtPointer);
 void render_all_history();
+void append_to_conversation(const char* text);
+void append_to_conversation_ex(const char* text, Boolean scroll);
 unsigned char* read_file_to_buffer(const char*, size_t*);
 char* base64_encode(const unsigned char*, size_t);
 static void popup_handler(Widget, XtPointer, XEvent*, Boolean*);
@@ -171,25 +176,49 @@ static void openai_base_url_focus_in_cb(Widget, XtPointer, XtPointer);
 static void openai_base_url_focus_out_cb(Widget, XtPointer, XtPointer);
 
 
-void append_to_conversation(const char* text) {
+void append_to_conversation_ex(const char* text, Boolean scroll) {
     if (!conversation_text || !XtIsManaged(conversation_text)) return;
     XmTextPosition pos = XmTextGetLastPosition(conversation_text);
     XmTextInsert(conversation_text, pos, (char*)text);
-    XmTextShowPosition(conversation_text, XmTextGetLastPosition(conversation_text));
+    if (scroll) {
+        XmTextShowPosition(conversation_text, XmTextGetLastPosition(conversation_text));
+    }
+}
+
+void append_to_conversation(const char* text) {
+    append_to_conversation_ex(text, True);
 }
 
 void append_to_assistant_buffer(const char* text) {
     if (!text) return;
     size_t len = strlen(text);
-    if (current_assistant_response_len + len + 1 > current_assistant_response_capacity) {
-        current_assistant_response_capacity = (current_assistant_response_len + len + 1) * 2;
-        char *new_buf = realloc(current_assistant_response_buffer, current_assistant_response_capacity);
+    if (len > SIZE_MAX - current_assistant_response_len - 1) {
+        fprintf(stderr, "Assistant buffer overflow: total length would exceed SIZE_MAX\n");
+        return;
+    }
+    size_t needed = current_assistant_response_len + len + 1;
+    if (needed > current_assistant_response_capacity) {
+        size_t new_capacity = needed;
+        if (new_capacity <= SIZE_MAX / 2) {
+            new_capacity *= 2;
+        } else {
+            new_capacity = SIZE_MAX;
+        }
+        char *new_buf = realloc(current_assistant_response_buffer, new_capacity);
+        if (!new_buf) {
+            // If doubling failed, try to allocate just what we need
+            if (new_capacity > needed) {
+                new_capacity = needed;
+                new_buf = realloc(current_assistant_response_buffer, new_capacity);
+            }
+        }
         if (!new_buf) {
             perror("realloc assistant_buffer"); free(current_assistant_response_buffer);
             current_assistant_response_buffer = NULL; current_assistant_response_len = 0; current_assistant_response_capacity = 0;
             return;
         }
         current_assistant_response_buffer = new_buf;
+        current_assistant_response_capacity = new_capacity;
     }
     memcpy(current_assistant_response_buffer + current_assistant_response_len, text, len);
     current_assistant_response_len += len;
@@ -376,6 +405,32 @@ void *perform_llm_request_thread(void *arg) {
     return NULL;
 }
 
+void generate_system_prompt(char *buffer, size_t buffer_size, const char *custom_prompt, Boolean append_default) {
+    char default_prompt[512];
+    time_t now = time(0);
+    struct tm* ltm = localtime(&now);
+    char dateStr[80];
+    strftime(dateStr, sizeof(dateStr), "%A, %B %d, %Y", ltm);
+    snprintf(default_prompt, sizeof(default_prompt),
+             "- You are MotifGPT, an assistant whose client program runs on UNIX with the Motif toolkit.\n"
+             "- The current date is %s.\n"
+             "- The user's environment does not format Markdown. Do not produce any Markdown unless the user explicitly requests it.",
+             dateStr);
+
+    if (!custom_prompt || strlen(custom_prompt) == 0) {
+        strncpy(buffer, default_prompt, buffer_size - 1);
+        buffer[buffer_size - 1] = '\0';
+    } else {
+        if (append_default) {
+            snprintf(buffer, buffer_size,
+                     "%s\n\n%s", default_prompt, custom_prompt);
+        } else {
+            strncpy(buffer, custom_prompt, buffer_size - 1);
+            buffer[buffer_size - 1] = '\0';
+        }
+    }
+}
+
 void start_llm_request() {
     char *input_string_raw = XmTextGetString(input_text);
     if ((!input_string_raw || strlen(input_string_raw) == 0) && !attached_image_base64_data) {
@@ -401,14 +456,14 @@ void start_llm_request() {
     } else {
          snprintf(display_msg_text_part, sizeof(display_msg_text_part), "%s: ", USER_NICKNAME);
     }
-    char full_display_msg[2048]; strcpy(full_display_msg, display_msg_text_part);
+    char full_display_msg[2048 + PATH_MAX];
     if (attached_image_base64_data) {
-        char image_indicator[FILENAME_MAX + 50];
         char path_copy[PATH_MAX]; strncpy(path_copy, attached_image_path, PATH_MAX); path_copy[PATH_MAX-1] = '\0';
-        snprintf(image_indicator, sizeof(image_indicator), " [Image Attached: %s]", basename(path_copy));
-        strcat(full_display_msg, image_indicator);
+        snprintf(full_display_msg, sizeof(full_display_msg), "%s [Image Attached: %s]\n", display_msg_text_part, basename(path_copy));
+    } else {
+        snprintf(full_display_msg, sizeof(full_display_msg), "%s\n", display_msg_text_part);
     }
-    strcat(full_display_msg, "\n"); append_to_conversation(full_display_msg);
+    append_to_conversation(full_display_msg);
     add_message_to_history(DP_ROLE_USER, input_string_raw ? input_string_raw : "",
                            attached_image_base64_data ? attached_image_mime_type : NULL,
                            attached_image_base64_data);
@@ -431,28 +486,7 @@ void start_llm_request() {
         thread_data->config.model = current_anthropic_model;
     }
 
-    // --- System Prompt Logic (ported from BeGPT) ---
-    char default_prompt[512];
-    time_t now = time(0);
-    struct tm* ltm = localtime(&now);
-    char dateStr[80];
-    strftime(dateStr, sizeof(dateStr), "%A, %B %d, %Y", ltm);
-    snprintf(default_prompt, sizeof(default_prompt),
-             "- You are MotifGPT, an assistant whose client program runs on UNIX with the Motif toolkit.\n"
-             "- The current date is %s.\n"
-             "- The user's environment does not format Markdown. Do not produce any Markdown unless the user explicitly requests it.",
-             dateStr);
-
-    if (strlen(current_system_prompt) == 0) {
-        strncpy(thread_data->system_prompt_buffer, default_prompt, sizeof(thread_data->system_prompt_buffer) - 1);
-    } else {
-        if (append_default_system_prompt) {
-            snprintf(thread_data->system_prompt_buffer, sizeof(thread_data->system_prompt_buffer),
-                     "%s\n\n%s", default_prompt, current_system_prompt);
-        } else {
-            strncpy(thread_data->system_prompt_buffer, current_system_prompt, sizeof(thread_data->system_prompt_buffer) - 1);
-        }
-    }
+    generate_system_prompt(thread_data->system_prompt_buffer, sizeof(thread_data->system_prompt_buffer), current_system_prompt, append_default_system_prompt);
     // The config.system_prompt pointer will be set inside the thread to point to system_prompt_buffer.
     // This avoids passing a pointer to a stack variable to the new thread.
 
@@ -724,7 +758,7 @@ char* get_config_path(const char* filename) {
         snprintf(path, sizeof(path), "%s/.config/motifgpt/%s", env_path, filename);
     }
     if (path[0] == '~') {
-        if (wordexp(path, &p, 0) == 0) {
+        if (wordexp(path, &p, WRDE_NOCMD) == 0) {
             if (p.we_wordc > 0) strncpy(path, p.we_wordv[0], sizeof(path) - 1);
             path[sizeof(path) - 1] = '\0'; wordfree(&p);
         } else { fprintf(stderr, "wordexp failed for path: %s\n", path); }
@@ -926,41 +960,6 @@ void save_chat_as_callback(Widget w, XtPointer client_data, XtPointer call_data)
     XtManageChild(file_selector);
 }
 
-char* base64_encode(const unsigned char *data, size_t input_length) {
-    const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    size_t output_length = 4 * ((input_length + 2) / 3);
-    char *encoded_data = malloc(output_length + 1);
-    if (!encoded_data) { perror("malloc base64"); return NULL; }
-    for (size_t i = 0, j = 0; i < input_length;) {
-        uint32_t octet_a = i < input_length ? data[i++] : 0;
-        uint32_t octet_b = i < input_length ? data[i++] : 0;
-        uint32_t octet_c = i < input_length ? data[i++] : 0;
-        uint32_t triple = (octet_a << 16) + (octet_b << 8) + octet_c;
-        encoded_data[j++] = base64_chars[(triple >> 18) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 12) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 6) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 0) & 0x3F];
-    }
-    for (size_t i = 0; i < (3 - input_length % 3) % 3; i++) encoded_data[output_length - 1 - i] = '=';
-    encoded_data[output_length] = '\0';
-    return encoded_data;
-}
-
-unsigned char* read_file_to_buffer(const char* filename, size_t* file_size) {
-    FILE* f = fopen(filename, "rb");
-    if (!f) { perror("fopen read_file"); return NULL; }
-    fseek(f, 0, SEEK_END); long size = ftell(f);
-    if (size < 0 || size > 20 * 1024 * 1024) {
-        fclose(f); fprintf(stderr, "File too large (max 20MB) or ftell error.\n"); return NULL;
-    }
-    *file_size = (size_t)size; fseek(f, 0, SEEK_SET);
-    unsigned char* buffer = malloc(*file_size);
-    if (!buffer) { fclose(f); perror("malloc read_file"); return NULL; }
-    if (fread(buffer, 1, *file_size, f) != *file_size) {
-        fclose(f); free(buffer); fprintf(stderr, "fread error.\n"); return NULL;
-    }
-    fclose(f); return buffer;
-}
 
 void initialize_dp_context() {
     if (dp_ctx) { dp_destroy_context(dp_ctx); dp_ctx = NULL; }
@@ -1078,6 +1077,16 @@ void settings_tab_change_callback(Widget w, XtPointer client_data, XtPointer cal
     if (settings_current_tab_content) XtManageChild(settings_current_tab_content);
 }
 
+static void update_settings_text_field(Widget tf, const char *value, const char *placeholder) {
+    if (strlen(value) == 0) {
+        XmTextFieldSetString(tf, (char*)placeholder);
+        XtVaSetValues(tf, XmNforeground, grey_fg_color, NULL);
+    } else {
+        XmTextFieldSetString(tf, (char*)value);
+        XtVaSetValues(tf, XmNforeground, normal_fg_color, NULL);
+    }
+}
+
 void populate_settings_dialog() {
     XmToggleButtonSetState(provider_gemini_rb, current_api_provider == DP_PROVIDER_GOOGLE_GEMINI, False);
     XmToggleButtonSetState(provider_openai_rb, current_api_provider == DP_PROVIDER_OPENAI_COMPATIBLE, False);
@@ -1096,61 +1105,19 @@ void populate_settings_dialog() {
     XtSetSensitive(history_length_text, !history_limits_disabled);
 
     // Gemini
-    if (strlen(current_gemini_api_key) == 0) {
-        XmTextFieldSetString(gemini_api_key_text, DEFAULT_GEMINI_KEY_PLACEHOLDER);
-        XtVaSetValues(gemini_api_key_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(gemini_api_key_text, current_gemini_api_key);
-        XtVaSetValues(gemini_api_key_text, XmNforeground, normal_fg_color, NULL);
-    }
-    if (strlen(current_gemini_model) == 0) {
-        XmTextFieldSetString(gemini_model_text, DEFAULT_GEMINI_MODEL);
-        XtVaSetValues(gemini_model_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(gemini_model_text, current_gemini_model);
-        XtVaSetValues(gemini_model_text, XmNforeground, normal_fg_color, NULL);
-    }
+    update_settings_text_field(gemini_api_key_text, current_gemini_api_key, DEFAULT_GEMINI_KEY_PLACEHOLDER);
+    update_settings_text_field(gemini_model_text, current_gemini_model, DEFAULT_GEMINI_MODEL);
     XmListDeleteAllItems(gemini_model_list);
 
     // OpenAI
-    if (strlen(current_openai_api_key) == 0) {
-        XmTextFieldSetString(openai_api_key_text, DEFAULT_OPENAI_KEY_PLACEHOLDER);
-        XtVaSetValues(openai_api_key_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(openai_api_key_text, current_openai_api_key);
-        XtVaSetValues(openai_api_key_text, XmNforeground, normal_fg_color, NULL);
-    }
-    if (strlen(current_openai_model) == 0) {
-        XmTextFieldSetString(openai_model_text, DEFAULT_OPENAI_MODEL);
-        XtVaSetValues(openai_model_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(openai_model_text, current_openai_model);
-        XtVaSetValues(openai_model_text, XmNforeground, normal_fg_color, NULL);
-    }
-    if (strlen(current_openai_base_url) == 0) {
-        XmTextFieldSetString(openai_base_url_text, DEFAULT_OPENAI_BASE_URL);
-        XtVaSetValues(openai_base_url_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(openai_base_url_text, current_openai_base_url);
-        XtVaSetValues(openai_base_url_text, XmNforeground, normal_fg_color, NULL);
-    }
+    update_settings_text_field(openai_api_key_text, current_openai_api_key, DEFAULT_OPENAI_KEY_PLACEHOLDER);
+    update_settings_text_field(openai_model_text, current_openai_model, DEFAULT_OPENAI_MODEL);
+    update_settings_text_field(openai_base_url_text, current_openai_base_url, DEFAULT_OPENAI_BASE_URL);
     XmListDeleteAllItems(openai_model_list);
 
     // Anthropic
-    if (strlen(current_anthropic_api_key) == 0) {
-        XmTextFieldSetString(anthropic_api_key_text, DEFAULT_ANTHROPIC_KEY_PLACEHOLDER);
-        XtVaSetValues(anthropic_api_key_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(anthropic_api_key_text, current_anthropic_api_key);
-        XtVaSetValues(anthropic_api_key_text, XmNforeground, normal_fg_color, NULL);
-    }
-    if (strlen(current_anthropic_model) == 0) {
-        XmTextFieldSetString(anthropic_model_text, DEFAULT_ANTHROPIC_MODEL);
-        XtVaSetValues(anthropic_model_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(anthropic_model_text, current_anthropic_model);
-        XtVaSetValues(anthropic_model_text, XmNforeground, normal_fg_color, NULL);
-    }
+    update_settings_text_field(anthropic_api_key_text, current_anthropic_api_key, DEFAULT_ANTHROPIC_KEY_PLACEHOLDER);
+    update_settings_text_field(anthropic_model_text, current_anthropic_model, DEFAULT_ANTHROPIC_MODEL);
     XmListDeleteAllItems(anthropic_model_list);
 }
 
@@ -1372,12 +1339,14 @@ void render_all_history() {
                 }
             }
         }
-
         if (current_len < buffer_size - 1) {
             line_buffer[current_len++] = '\n';
             line_buffer[current_len] = '\0';
         }
-        append_to_conversation(line_buffer);
+        append_to_conversation_ex(line_buffer, False);
+    }
+    if (conversation_text && XtIsManaged(conversation_text)) {
+        XmTextShowPosition(conversation_text, XmTextGetLastPosition(conversation_text));
     }
 }
 
