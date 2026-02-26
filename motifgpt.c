@@ -62,6 +62,16 @@
 #define CONFIG_DIR_MODE 0755
 #define CONFIG_FILE_NAME "settings.conf"
 #define CACHE_DIR_NAME "cache"
+
+// Buffer sizes
+#define API_KEY_BUF_SIZE 256
+#define MODEL_ID_BUF_SIZE 128
+#define API_URL_BUF_SIZE 256
+#define SYSTEM_PROMPT_BUF_SIZE 2048
+#define THREAD_SYSTEM_PROMPT_BUF_SIZE (SYSTEM_PROMPT_BUF_SIZE * 2)
+#define DISPLAY_MSG_BUF_SIZE (2048 + PATH_MAX)
+#define DEFAULT_MAX_TOKENS 2048
+
 // --- End Configuration ---
 
 // Globals
@@ -88,17 +98,17 @@ Widget system_prompt_text;
 Widget append_prompt_toggle;
 
 dp_provider_type_t current_api_provider = DEFAULT_PROVIDER;
-char current_gemini_api_key[256] = "";
-char current_gemini_model[128] = DEFAULT_GEMINI_MODEL;
-char current_openai_api_key[256] = "";
-char current_openai_model[128] = DEFAULT_OPENAI_MODEL;
-char current_openai_base_url[256] = "";
-char current_anthropic_api_key[256] = "";
-char current_anthropic_model[128] = DEFAULT_ANTHROPIC_MODEL;
+char current_gemini_api_key[API_KEY_BUF_SIZE] = "";
+char current_gemini_model[MODEL_ID_BUF_SIZE] = DEFAULT_GEMINI_MODEL;
+char current_openai_api_key[API_KEY_BUF_SIZE] = "";
+char current_openai_model[MODEL_ID_BUF_SIZE] = DEFAULT_OPENAI_MODEL;
+char current_openai_base_url[API_URL_BUF_SIZE] = "";
+char current_anthropic_api_key[API_KEY_BUF_SIZE] = "";
+char current_anthropic_model[MODEL_ID_BUF_SIZE] = DEFAULT_ANTHROPIC_MODEL;
 int current_max_history_messages = DEFAULT_MAX_HISTORY_MESSAGES;
 Boolean history_limits_disabled = False;
 Boolean enter_key_sends_message = True;
-char current_system_prompt[2048] = "";
+char current_system_prompt[SYSTEM_PROMPT_BUF_SIZE] = "";
 Boolean append_default_system_prompt = True;
 
 char attached_image_path[PATH_MAX] = "";
@@ -125,8 +135,8 @@ typedef enum {
     PIPE_MSG_MODEL_LIST_ITEM, PIPE_MSG_MODEL_LIST_END, PIPE_MSG_MODEL_LIST_ERROR
 } pipe_message_type_t;
 typedef struct { pipe_message_type_t type; char data[512]; } pipe_message_t;
-typedef struct { dp_request_config_t config; char system_prompt_buffer[4096]; } llm_thread_data_t;
-typedef struct { dp_provider_type_t provider; char api_key_for_list[256]; char base_url_for_list[256]; } get_models_thread_data_t;
+typedef struct { dp_request_config_t config; char system_prompt_buffer[THREAD_SYSTEM_PROMPT_BUF_SIZE]; } llm_thread_data_t;
+typedef struct { dp_provider_type_t provider; char api_key_for_list[API_KEY_BUF_SIZE]; char base_url_for_list[API_URL_BUF_SIZE]; } get_models_thread_data_t;
 
 // Function Prototypes
 void send_message_callback(Widget, XtPointer, XtPointer);
@@ -452,7 +462,7 @@ void start_llm_request() {
     } else {
          snprintf(display_msg_text_part, sizeof(display_msg_text_part), "%s: ", USER_NICKNAME);
     }
-    char full_display_msg[2048 + PATH_MAX];
+    char full_display_msg[DISPLAY_MSG_BUF_SIZE]; strcpy(full_display_msg, display_msg_text_part);
     if (attached_image_base64_data) {
         char path_copy[PATH_MAX]; strncpy(path_copy, attached_image_path, PATH_MAX); path_copy[PATH_MAX-1] = '\0';
         snprintf(full_display_msg, sizeof(full_display_msg), "%s [Image Attached: %s]\n", display_msg_text_part, basename(path_copy));
@@ -486,7 +496,7 @@ void start_llm_request() {
     // The config.system_prompt pointer will be set inside the thread to point to system_prompt_buffer.
     // This avoids passing a pointer to a stack variable to the new thread.
 
-    thread_data->config.temperature = 0.7; thread_data->config.max_tokens = 2048;
+    thread_data->config.temperature = 0.7; thread_data->config.max_tokens = DEFAULT_MAX_TOKENS;
     thread_data->config.stream = true;
     thread_data->config.messages = chat_history;
     thread_data->config.num_messages = chat_history_count;
