@@ -139,6 +139,7 @@ static void app_text_key_press_handler(Widget, XtPointer, XEvent*, Boolean*);
 static void focus_callback(Widget, XtPointer, XtPointer);
 static void settings_text_field_focus_in_cb(Widget, XtPointer, XtPointer);
 static void settings_text_field_focus_out_cb(Widget, XtPointer, XtPointer);
+static int ends_with_ignore_case(const char *str, const char *suffix);
 void clear_chat_callback(Widget, XtPointer, XtPointer);
 void add_message_to_history(dp_message_role_t, const char*, const char*, const char*);
 void free_chat_history();
@@ -859,14 +860,33 @@ void save_settings() {
     fclose(fp); printf("Settings saved to %s\n", settings_file);
 }
 
+static int ends_with_ignore_case(const char *str, const char *suffix) {
+    if (!str || !suffix) return 0;
+    size_t str_len = strlen(str);
+    size_t suffix_len = strlen(suffix);
+    if (suffix_len > str_len) return 0;
+
+    const char *p_str = str + str_len - suffix_len;
+    const char *p_suffix = suffix;
+
+    while (*p_suffix) {
+        if (tolower((unsigned char)*p_str) != tolower((unsigned char)*p_suffix)) {
+            return 0;
+        }
+        p_str++;
+        p_suffix++;
+    }
+    return 1;
+}
+
 void file_selection_ok_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     XmFileSelectionBoxCallbackStruct *cbs = (XmFileSelectionBoxCallbackStruct *)call_data;
     char *filename = NULL; XmStringGetLtoR(cbs->value, XmFONTLIST_DEFAULT_TAG, &filename);
     if (!filename || strlen(filename) == 0) { XtFree(filename); return; }
     strncpy(attached_image_path, filename, PATH_MAX -1); attached_image_path[PATH_MAX-1] = '\0';
-    if (strstr(filename, ".png") || strstr(filename, ".PNG")) strcpy(attached_image_mime_type, "image/png");
-    else if (strstr(filename, ".jpg") || strstr(filename, ".JPG") || strstr(filename, ".jpeg") || strstr(filename, ".JPEG")) strcpy(attached_image_mime_type, "image/jpeg");
-    else if (strstr(filename, ".gif") || strstr(filename, ".GIF")) strcpy(attached_image_mime_type, "image/gif");
+    if (ends_with_ignore_case(filename, ".png")) strcpy(attached_image_mime_type, "image/png");
+    else if (ends_with_ignore_case(filename, ".jpg") || ends_with_ignore_case(filename, ".jpeg")) strcpy(attached_image_mime_type, "image/jpeg");
+    else if (ends_with_ignore_case(filename, ".gif")) strcpy(attached_image_mime_type, "image/gif");
     else { show_error_dialog("Unsupported image type (PNG, JPG, GIF)."); XtFree(filename); attached_image_path[0] = '\0'; return; }
     size_t file_size; unsigned char *file_buffer = read_file_to_buffer(filename, &file_size); XtFree(filename);
     if (!file_buffer) { show_error_dialog("Could not read image file."); attached_image_path[0] = '\0'; return; }
