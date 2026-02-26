@@ -208,8 +208,13 @@ void settings_apply_callback(Widget, XtPointer, XtPointer); void settings_ok_cal
 void settings_cancel_callback(Widget, XtPointer, XtPointer); void settings_get_models_callback(Widget, XtPointer, XtPointer);
 void *perform_get_models_thread(void*); void settings_use_selected_model_callback(Widget, XtPointer, XtPointer);
 void populate_settings_dialog(); void retrieve_settings_from_dialog();
-void create_general_tab(Widget parent); void create_gemini_tab(Widget parent);
-void create_openai_tab(Widget parent); void create_anthropic_tab(Widget parent);
+Widget create_provider_settings_tab(Widget parent, const char *prefix,
+                                    Widget *api_key_text_w, const char *api_key_placeholder,
+                                    Widget *model_id_text_w, const char *model_id_placeholder,
+                                    Widget *model_list_w,
+                                    Widget *base_url_text_w, const char *base_url_placeholder,
+                                    int tab_index);
+void create_general_tab(Widget parent);
 void settings_disable_history_limit_toggle_cb(Widget, XtPointer, XtPointer);
 static void openai_base_url_focus_in_cb(Widget, XtPointer, XtPointer);
 static void openai_base_url_focus_out_cb(Widget, XtPointer, XtPointer);
@@ -1501,75 +1506,98 @@ void create_general_tab(Widget parent) {
     append_prompt_toggle = XtVaCreateManagedWidget("Append to MotifGPT default system prompt", xmToggleButtonWidgetClass, settings_general_tab_content, XmNbottomAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, NULL);
 }
 
-void create_gemini_tab(Widget parent) {
-    settings_gemini_tab_content = XtVaCreateWidget("geminiTab", xmFormWidgetClass, parent, XmNmarginWidth, 10, XmNmarginHeight, 10, XmNtopOffset, 10, XmNleftOffset, 10, XmNrightOffset, 10, XmNbottomOffset, 10, NULL);
-    Widget gemini_api_label = XtVaCreateManagedWidget("API Key:", xmLabelWidgetClass, settings_gemini_tab_content, XmNtopAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, XmNalignment, XmALIGNMENT_BEGINNING, NULL);
-    gemini_api_key_text = XtVaCreateManagedWidget("geminiApiKeyText", xmTextFieldWidgetClass, settings_gemini_tab_content, XmNcolumns, 40, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, gemini_api_label, XmNtopOffset, 2, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, NULL);
-    XtAddCallback(gemini_api_key_text, XmNfocusCallback, settings_text_field_focus_in_cb, (XtPointer)DEFAULT_GEMINI_KEY_PLACEHOLDER);
-    XtAddCallback(gemini_api_key_text, XmNlosingFocusCallback, settings_text_field_focus_out_cb, (XtPointer)DEFAULT_GEMINI_KEY_PLACEHOLDER);
-    XtAddEventHandler(gemini_api_key_text, KeyPressMask, False, app_text_key_press_handler, NULL);
-    XtAddEventHandler(gemini_api_key_text, ButtonPressMask, False, popup_handler, NULL);
-    Widget gemini_model_label = XtVaCreateManagedWidget("Model ID:", xmLabelWidgetClass, settings_gemini_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, gemini_api_key_text, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNalignment, XmALIGNMENT_BEGINNING, NULL);
-    gemini_model_text = XtVaCreateManagedWidget("geminiModelText", xmTextFieldWidgetClass, settings_gemini_tab_content, XmNcolumns, 40, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, gemini_model_label, XmNtopOffset, 2, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, NULL);
-    XtAddCallback(gemini_model_text, XmNfocusCallback, settings_text_field_focus_in_cb, (XtPointer)DEFAULT_GEMINI_MODEL);
-    XtAddCallback(gemini_model_text, XmNlosingFocusCallback, settings_text_field_focus_out_cb, (XtPointer)DEFAULT_GEMINI_MODEL);
-    XtAddEventHandler(gemini_model_text, KeyPressMask, False, app_text_key_press_handler, NULL);
-    XtAddEventHandler(gemini_model_text, ButtonPressMask, False, popup_handler, NULL);
-    Widget gemini_get_models_btn = XtVaCreateManagedWidget("Get Models", xmPushButtonWidgetClass, settings_gemini_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, gemini_model_text, XmNtopOffset, 10, XmNleftAttachment, XmATTACH_FORM, NULL);
-    XtAddCallback(gemini_get_models_btn, XmNactivateCallback, settings_get_models_callback, (XtPointer)0);
-    Widget gemini_use_model_btn = XtVaCreateManagedWidget("Use Selected", xmPushButtonWidgetClass, settings_gemini_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, gemini_model_text, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_WIDGET, XmNleftWidget, gemini_get_models_btn, XmNleftOffset, 10, NULL);
-    XtAddCallback(gemini_use_model_btn, XmNactivateCallback, settings_use_selected_model_callback, (XtPointer)0);
-    gemini_model_list = XmCreateScrolledList(settings_gemini_tab_content, "geminiModelList", NULL, 0);
-    XtVaSetValues(XtParent(gemini_model_list), XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, gemini_get_models_btn, XmNtopOffset,5, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM,NULL);
-    XtManageChild(gemini_model_list);
-}
+Widget create_provider_settings_tab(Widget parent, const char *prefix,
+                                    Widget *api_key_text_w, const char *api_key_placeholder,
+                                    Widget *model_id_text_w, const char *model_id_placeholder,
+                                    Widget *model_list_w,
+                                    Widget *base_url_text_w, const char *base_url_placeholder,
+                                    int tab_index) {
+    char name_buffer[256];
 
-void create_openai_tab(Widget parent) {
-    settings_openai_tab_content = XtVaCreateWidget("openaiTab", xmFormWidgetClass, parent, XmNmarginWidth, 10, XmNmarginHeight, 10, XmNtopOffset, 10, XmNleftOffset, 10, XmNrightOffset, 10, XmNbottomOffset, 10, NULL);
-    Widget openai_api_label = XtVaCreateManagedWidget("API Key:", xmLabelWidgetClass, settings_openai_tab_content, XmNtopAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, XmNalignment, XmALIGNMENT_BEGINNING, NULL);
-    openai_api_key_text = XtVaCreateManagedWidget("openaiApiKeyText", xmTextFieldWidgetClass, settings_openai_tab_content, XmNcolumns, 40, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_api_label, XmNtopOffset, 2, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, NULL);
-    XtAddCallback(openai_api_key_text, XmNfocusCallback, settings_text_field_focus_in_cb, (XtPointer)DEFAULT_OPENAI_KEY_PLACEHOLDER);
-    XtAddCallback(openai_api_key_text, XmNlosingFocusCallback, settings_text_field_focus_out_cb, (XtPointer)DEFAULT_OPENAI_KEY_PLACEHOLDER);
-    XtAddEventHandler(openai_api_key_text, KeyPressMask, False, app_text_key_press_handler, NULL);
-    XtAddEventHandler(openai_api_key_text, ButtonPressMask, False, popup_handler, NULL);
-    Widget openai_base_url_label = XtVaCreateManagedWidget("API Base URL (optional):", xmLabelWidgetClass, settings_openai_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_api_key_text, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNalignment, XmALIGNMENT_BEGINNING, NULL);
-    openai_base_url_text = XtVaCreateManagedWidget("openaiBaseUrlText", xmTextFieldWidgetClass, settings_openai_tab_content, XmNcolumns, 40, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_base_url_label, XmNtopOffset, 2, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, NULL);
-    XtAddCallback(openai_base_url_text, XmNfocusCallback, openai_base_url_focus_in_cb, NULL);
-    XtAddCallback(openai_base_url_text, XmNlosingFocusCallback, openai_base_url_focus_out_cb, NULL);
-    XtAddEventHandler(openai_base_url_text, KeyPressMask, False, app_text_key_press_handler, NULL);
-    XtAddEventHandler(openai_base_url_text, ButtonPressMask, False, popup_handler, NULL);
-    Widget openai_model_label = XtVaCreateManagedWidget("Model ID:", xmLabelWidgetClass, settings_openai_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_base_url_text, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNalignment, XmALIGNMENT_BEGINNING, NULL);
-    openai_model_text = XtVaCreateManagedWidget("openaiModelText", xmTextFieldWidgetClass, settings_openai_tab_content, XmNcolumns, 40, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_model_label, XmNtopOffset, 2, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, NULL);
-    XtAddCallback(openai_model_text, XmNfocusCallback, settings_text_field_focus_in_cb, (XtPointer)DEFAULT_OPENAI_MODEL);
-    XtAddCallback(openai_model_text, XmNlosingFocusCallback, settings_text_field_focus_out_cb, (XtPointer)DEFAULT_OPENAI_MODEL);
-    XtAddEventHandler(openai_model_text, KeyPressMask, False, app_text_key_press_handler, NULL);
-    XtAddEventHandler(openai_model_text, ButtonPressMask, False, popup_handler, NULL);
-    Widget openai_get_models_btn = XtVaCreateManagedWidget("Get Models", xmPushButtonWidgetClass, settings_openai_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_model_text, XmNtopOffset, 10, XmNleftAttachment, XmATTACH_FORM, NULL);
-    XtAddCallback(openai_get_models_btn, XmNactivateCallback, settings_get_models_callback, (XtPointer)1);
-    Widget openai_use_model_btn = XtVaCreateManagedWidget("Use Selected", xmPushButtonWidgetClass, settings_openai_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_model_text, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_WIDGET, XmNleftWidget, openai_get_models_btn, XmNleftOffset, 10, NULL);
-    XtAddCallback(openai_use_model_btn, XmNactivateCallback, settings_use_selected_model_callback, (XtPointer)1);
-    openai_model_list = XmCreateScrolledList(settings_openai_tab_content, "openaiModelList", NULL, 0);
-    XtVaSetValues(XtParent(openai_model_list), XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, openai_get_models_btn, XmNtopOffset,5, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM,NULL);
-    XtManageChild(openai_model_list);
-}
+    snprintf(name_buffer, sizeof(name_buffer), "%sTab", prefix);
+    Widget tab = XtVaCreateWidget(name_buffer, xmFormWidgetClass, parent,
+                                  XmNmarginWidth, 10, XmNmarginHeight, 10,
+                                  XmNtopOffset, 10, XmNleftOffset, 10, XmNrightOffset, 10, XmNbottomOffset, 10,
+                                  NULL);
 
-void create_anthropic_tab(Widget parent) {
-    settings_anthropic_tab_content = XtVaCreateWidget("anthropicTab", xmFormWidgetClass, parent, XmNmarginWidth, 10, XmNmarginHeight, 10, XmNtopOffset, 10, XmNleftOffset, 10, XmNrightOffset, 10, XmNbottomOffset, 10, NULL);
-    Widget anthropic_api_label = XtVaCreateManagedWidget("API Key:", xmLabelWidgetClass, settings_anthropic_tab_content, XmNtopAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, XmNalignment, XmALIGNMENT_BEGINNING, NULL);
-    anthropic_api_key_text = XtVaCreateManagedWidget("anthropicApiKeyText", xmTextFieldWidgetClass, settings_anthropic_tab_content, XmNcolumns, 40, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, anthropic_api_label, XmNtopOffset, 2, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, NULL);
-    XtAddCallback(anthropic_api_key_text, XmNfocusCallback, settings_text_field_focus_in_cb, (XtPointer)DEFAULT_ANTHROPIC_KEY_PLACEHOLDER);
-    XtAddCallback(anthropic_api_key_text, XmNlosingFocusCallback, settings_text_field_focus_out_cb, (XtPointer)DEFAULT_ANTHROPIC_KEY_PLACEHOLDER);
-    Widget anthropic_model_label = XtVaCreateManagedWidget("Model ID:", xmLabelWidgetClass, settings_anthropic_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, anthropic_api_key_text, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNalignment, XmALIGNMENT_BEGINNING, NULL);
-    anthropic_model_text = XtVaCreateManagedWidget("anthropicModelText", xmTextFieldWidgetClass, settings_anthropic_tab_content, XmNcolumns, 40, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, anthropic_model_label, XmNtopOffset, 2, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, NULL);
-    XtAddCallback(anthropic_model_text, XmNfocusCallback, settings_text_field_focus_in_cb, (XtPointer)DEFAULT_ANTHROPIC_MODEL);
-    XtAddCallback(anthropic_model_text, XmNlosingFocusCallback, settings_text_field_focus_out_cb, (XtPointer)DEFAULT_ANTHROPIC_MODEL);
-    Widget anthropic_get_models_btn = XtVaCreateManagedWidget("Get Models", xmPushButtonWidgetClass, settings_anthropic_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, anthropic_model_text, XmNtopOffset, 10, XmNleftAttachment, XmATTACH_FORM, NULL);
-    XtAddCallback(anthropic_get_models_btn, XmNactivateCallback, settings_get_models_callback, (XtPointer)2);
-    Widget anthropic_use_model_btn = XtVaCreateManagedWidget("Use Selected", xmPushButtonWidgetClass, settings_anthropic_tab_content, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, anthropic_model_text, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_WIDGET, XmNleftWidget, anthropic_get_models_btn, XmNleftOffset, 10, NULL);
-    XtAddCallback(anthropic_use_model_btn, XmNactivateCallback, settings_use_selected_model_callback, (XtPointer)2);
-    anthropic_model_list = XmCreateScrolledList(settings_anthropic_tab_content, "anthropicModelList", NULL, 0);
-    XtVaSetValues(XtParent(anthropic_model_list), XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, anthropic_get_models_btn, XmNtopOffset,5, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM,NULL);
-    XtManageChild(anthropic_model_list);
+    Widget api_label = XtVaCreateManagedWidget("API Key:", xmLabelWidgetClass, tab,
+                                               XmNtopAttachment, XmATTACH_FORM,
+                                               XmNleftAttachment, XmATTACH_FORM,
+                                               XmNalignment, XmALIGNMENT_BEGINNING,
+                                               NULL);
+
+    snprintf(name_buffer, sizeof(name_buffer), "%sApiKeyText", prefix);
+    *api_key_text_w = XtVaCreateManagedWidget(name_buffer, xmTextFieldWidgetClass, tab,
+                                              XmNcolumns, 40,
+                                              XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, api_label, XmNtopOffset, 2,
+                                              XmNleftAttachment, XmATTACH_FORM,
+                                              XmNrightAttachment, XmATTACH_FORM,
+                                              NULL);
+    XtAddCallback(*api_key_text_w, XmNfocusCallback, settings_text_field_focus_in_cb, (XtPointer)api_key_placeholder);
+    XtAddCallback(*api_key_text_w, XmNlosingFocusCallback, settings_text_field_focus_out_cb, (XtPointer)api_key_placeholder);
+    XtAddEventHandler(*api_key_text_w, KeyPressMask, False, app_text_key_press_handler, NULL);
+    XtAddEventHandler(*api_key_text_w, ButtonPressMask, False, popup_handler, NULL);
+
+    Widget last_widget = *api_key_text_w;
+
+    if (base_url_text_w != NULL) {
+        Widget base_url_label = XtVaCreateManagedWidget("API Base URL (optional):", xmLabelWidgetClass, tab,
+                                                        XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, last_widget, XmNtopOffset, 5,
+                                                        XmNleftAttachment, XmATTACH_FORM,
+                                                        XmNalignment, XmALIGNMENT_BEGINNING,
+                                                        NULL);
+        snprintf(name_buffer, sizeof(name_buffer), "%sBaseUrlText", prefix);
+        *base_url_text_w = XtVaCreateManagedWidget(name_buffer, xmTextFieldWidgetClass, tab,
+                                                   XmNcolumns, 40,
+                                                   XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, base_url_label, XmNtopOffset, 2,
+                                                   XmNleftAttachment, XmATTACH_FORM,
+                                                   XmNrightAttachment, XmATTACH_FORM,
+                                                   NULL);
+        if (base_url_placeholder) {
+             XtAddCallback(*base_url_text_w, XmNfocusCallback, settings_text_field_focus_in_cb, (XtPointer)base_url_placeholder);
+             XtAddCallback(*base_url_text_w, XmNlosingFocusCallback, settings_text_field_focus_out_cb, (XtPointer)base_url_placeholder);
+        }
+        XtAddEventHandler(*base_url_text_w, KeyPressMask, False, app_text_key_press_handler, NULL);
+        XtAddEventHandler(*base_url_text_w, ButtonPressMask, False, popup_handler, NULL);
+        last_widget = *base_url_text_w;
+    }
+
+    Widget model_label = XtVaCreateManagedWidget("Model ID:", xmLabelWidgetClass, tab,
+                                                 XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, last_widget, XmNtopOffset, 5,
+                                                 XmNleftAttachment, XmATTACH_FORM,
+                                                 XmNalignment, XmALIGNMENT_BEGINNING,
+                                                 NULL);
+
+    snprintf(name_buffer, sizeof(name_buffer), "%sModelText", prefix);
+    *model_id_text_w = XtVaCreateManagedWidget(name_buffer, xmTextFieldWidgetClass, tab,
+                                               XmNcolumns, 40,
+                                               XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, model_label, XmNtopOffset, 2,
+                                               XmNleftAttachment, XmATTACH_FORM,
+                                               XmNrightAttachment, XmATTACH_FORM,
+                                               NULL);
+    XtAddCallback(*model_id_text_w, XmNfocusCallback, settings_text_field_focus_in_cb, (XtPointer)model_id_placeholder);
+    XtAddCallback(*model_id_text_w, XmNlosingFocusCallback, settings_text_field_focus_out_cb, (XtPointer)model_id_placeholder);
+    XtAddEventHandler(*model_id_text_w, KeyPressMask, False, app_text_key_press_handler, NULL);
+    XtAddEventHandler(*model_id_text_w, ButtonPressMask, False, popup_handler, NULL);
+
+    Widget get_models_btn = XtVaCreateManagedWidget("Get Models", xmPushButtonWidgetClass, tab,
+                                                    XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, *model_id_text_w, XmNtopOffset, 10,
+                                                    XmNleftAttachment, XmATTACH_FORM,
+                                                    NULL);
+    XtAddCallback(get_models_btn, XmNactivateCallback, settings_get_models_callback, (XtPointer)(long)tab_index);
+
+    Widget use_model_btn = XtVaCreateManagedWidget("Use Selected", xmPushButtonWidgetClass, tab,
+                                                   XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, *model_id_text_w, XmNtopOffset, 5,
+                                                   XmNleftAttachment, XmATTACH_WIDGET, XmNleftWidget, get_models_btn, XmNleftOffset, 10,
+                                                   NULL);
+    XtAddCallback(use_model_btn, XmNactivateCallback, settings_use_selected_model_callback, (XtPointer)(long)tab_index);
+
+    snprintf(name_buffer, sizeof(name_buffer), "%sModelList", prefix);
+    *model_list_w = XmCreateScrolledList(tab, name_buffer, NULL, 0);
+    XtVaSetValues(XtParent(*model_list_w), XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, get_models_btn, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM, NULL);
+    XtManageChild(*model_list_w);
+
+    return tab;
 }
 
 void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
@@ -1588,9 +1616,9 @@ void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
         Widget content_frame = XtVaCreateManagedWidget("contentFrame", xmFrameWidgetClass, dialog_form, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, tab_button_rc, XmNtopOffset, UI_SPACING_MEDIUM, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, UI_SPACING_MEDIUM, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, UI_SPACING_MEDIUM, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 45, XmNshadowType, XmSHADOW_ETCHED_IN, NULL);
 
         create_general_tab(content_frame);
-        create_gemini_tab(content_frame);
-        create_openai_tab(content_frame);
-        create_anthropic_tab(content_frame);
+        settings_gemini_tab_content = create_provider_settings_tab(content_frame, "gemini", &gemini_api_key_text, DEFAULT_GEMINI_KEY_PLACEHOLDER, &gemini_model_text, DEFAULT_GEMINI_MODEL, &gemini_model_list, NULL, NULL, 0);
+        settings_openai_tab_content = create_provider_settings_tab(content_frame, "openai", &openai_api_key_text, DEFAULT_OPENAI_KEY_PLACEHOLDER, &openai_model_text, DEFAULT_OPENAI_MODEL, &openai_model_list, &openai_base_url_text, DEFAULT_OPENAI_BASE_URL, 1);
+        settings_anthropic_tab_content = create_provider_settings_tab(content_frame, "anthropic", &anthropic_api_key_text, DEFAULT_ANTHROPIC_KEY_PLACEHOLDER, &anthropic_model_text, DEFAULT_ANTHROPIC_MODEL, &anthropic_model_list, NULL, NULL, 2);
 
         Widget button_rc_bottom = XtVaCreateManagedWidget("buttonRcBottom", xmRowColumnWidgetClass, dialog_form,
                                                    XmNorientation, XmHORIZONTAL, XmNpacking, XmPACK_TIGHT,
