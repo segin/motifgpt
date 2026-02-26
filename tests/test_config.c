@@ -3,15 +3,13 @@
 #include <string.h>
 #include <assert.h>
 #include <unistd.h>
-#include "../config.h"
+#include "../motifgpt_config.h"
 
 int main() {
     printf("Starting get_config_path tests...\n");
 
     // Test 1: XDG_CONFIG_HOME set
     printf("Test 1: XDG_CONFIG_HOME set\n");
-    // We must unset HOME so that if XDG_CONFIG_HOME fails for some reason, it doesn't fall back to HOME
-    // But get_config_path checks XDG_CONFIG_HOME first.
     unsetenv("HOME");
     setenv("XDG_CONFIG_HOME", "/tmp/config", 1);
     char *path = get_config_path("settings.conf");
@@ -32,8 +30,6 @@ int main() {
     printf("Test 3: HOME unset\n");
     unsetenv("HOME");
     unsetenv("XDG_CONFIG_HOME");
-    // This should print error to stderr and return NULL
-    // We can't easily capture stderr with assert, but we can check return value
     path = get_config_path("settings.conf");
     if (path == NULL) {
         printf("Got NULL as expected.\n");
