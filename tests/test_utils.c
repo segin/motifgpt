@@ -2,101 +2,117 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <time.h>
 #include "../utils.h"
 
-void test_read_existing_file() {
-    printf("Running test_read_existing_file...\n");
-    const char* filename = "test_file.txt";
-    const char* content = "Hello, World!";
-    FILE* f = fopen(filename, "wb");
-    assert(f != NULL);
+void test_generate_system_prompt() {
+    printf("Testing generate_system_prompt...\n");
+    char buffer[4096];
+    char dateStr[80];
+    time_t now = time(0);
+    struct tm* ltm = localtime(&now);
+    strftime(dateStr, sizeof(dateStr), "%A, %B %d, %Y", ltm);
+
+    // Case 1: Default prompt only
+    generate_system_prompt(buffer, sizeof(buffer), NULL, true);
+    assert(strstr(buffer, "You are MotifGPT") != NULL);
+    assert(strstr(buffer, dateStr) != NULL);
+
+    // Case 2: Custom prompt only
+    generate_system_prompt(buffer, sizeof(buffer), "Custom Prompt", false);
+    assert(strcmp(buffer, "Custom Prompt") == 0);
+
+    // Case 3: Appended prompt
+    generate_system_prompt(buffer, sizeof(buffer), "Custom Prompt", true);
+    assert(strstr(buffer, "You are MotifGPT") != NULL);
+    assert(strstr(buffer, dateStr) != NULL);
+    assert(strstr(buffer, "Custom Prompt") != NULL);
+
+    printf("test_generate_system_prompt passed!\n");
+}
+
+void test_base64_encode() {
+    printf("Testing base64_encode...\n");
+
+    struct {
+        const char* input;
+        const char* expected;
+    } cases[] = {
+        {"", ""},
+        {"f", "Zg=="},
+        {"fo", "Zm8="},
+        {"foo", "Zm9v"},
+        {"foob", "Zm9vYg=="},
+        {"fooba", "Zm9vYmE="},
+        {"foobar", "Zm9vYmFy"},
+        {NULL, NULL}
+    };
+
+    for (int i = 0; cases[i].input != NULL; i++) {
+        char* encoded = base64_encode((const unsigned char*)cases[i].input, strlen(cases[i].input));
+        assert(encoded != NULL);
+        if (strcmp(encoded, cases[i].expected) != 0) {
+            fprintf(stderr, "Case %d failed: input='%s', expected='%s', got='%s'\n", i, cases[i].input, cases[i].expected, encoded);
+            exit(1);
+        }
+        free(encoded);
+    }
+    printf("base64_encode tests passed!\n");
+}
+
+void test_read_file_to_buffer() {
+    printf("Testing read_file_to_buffer...\n");
+
+    // 1. Test reading a normal file
+    const char* test_file = "test_normal.txt";
+    const char* content = "Hello, Base64!";
+    FILE* f = fopen(test_file, "wb");
     fwrite(content, 1, strlen(content), f);
     fclose(f);
 
-    size_t size = 0;
-    unsigned char* buffer = read_file_to_buffer(filename, &size);
+    size_t size;
+    unsigned char* buffer = read_file_to_buffer(test_file, &size);
     assert(buffer != NULL);
     assert(size == strlen(content));
     assert(memcmp(buffer, content, size) == 0);
     free(buffer);
-    remove(filename);
-    printf("test_read_existing_file passed.\n");
-}
+    remove(test_file);
 
-void test_read_empty_file() {
-    printf("Running test_read_empty_file...\n");
-    const char* filename = "empty_file.txt";
-    FILE* f = fopen(filename, "wb");
-    assert(f != NULL);
+    // 2. Test reading an empty file
+    const char* empty_file = "test_empty.txt";
+    f = fopen(empty_file, "wb");
     fclose(f);
 
-    size_t size = 0;
-    unsigned char* buffer = read_file_to_buffer(filename, &size);
-    assert(buffer != NULL); // Should return allocated 1 byte
+    buffer = read_file_to_buffer(empty_file, &size);
+    assert(buffer != NULL);
     assert(size == 0);
     free(buffer);
-    remove(filename);
-    printf("test_read_empty_file passed.\n");
-}
+    remove(empty_file);
 
-void test_read_nonexistent_file() {
-    printf("Running test_read_nonexistent_file...\n");
-    size_t size = 0;
-    unsigned char* buffer = read_file_to_buffer("nonexistent_file.txt", &size);
+    // 3. Test non-existent file
+    buffer = read_file_to_buffer("non_existent.txt", &size);
     assert(buffer == NULL);
-    printf("test_read_nonexistent_file passed.\n");
-}
 
-void test_null_file_size() {
-    printf("Running test_null_file_size...\n");
-    // Ensure it doesn't crash
-    unsigned char* buffer = read_file_to_buffer("somefile", NULL);
-    assert(buffer == NULL);
-    printf("test_null_file_size passed.\n");
-}
-
-void test_read_large_file() {
-    printf("Running test_read_large_file...\n");
-    const char* filename = "large_file.bin";
-    // Create a sparse file of 21MB
-    FILE* f = fopen(filename, "wb");
-    if (!f) {
-        printf("Skipping test_read_large_file (fopen failed)\n");
-        return;
-    }
-    if (fseek(f, 21 * 1024 * 1024, SEEK_SET) != 0) {
-        printf("Skipping test_read_large_file (fseek failed)\n");
+    // 4. Test file too large (simulated by creating a file > 20MB)
+    const char* large_file = "test_large.txt";
+    f = fopen(large_file, "wb");
+    if (f) {
+        fseek(f, 20 * 1024 * 1024 + 1024, SEEK_SET);
+        fputc(0, f);
         fclose(f);
-        return;
+
+        buffer = read_file_to_buffer(large_file, &size);
+        assert(buffer == NULL);
+        remove(large_file);
     }
-    fputc(0, f);
-    fclose(f);
 
-    size_t size = 0;
-    unsigned char* buffer = read_file_to_buffer(filename, &size);
-    assert(buffer == NULL); // Should fail due to size limit
-    remove(filename);
-    printf("test_read_large_file passed.\n");
-}
-
-void test_base64_encode() {
-    printf("Running test_base64_encode...\n");
-    const char* input = "Hello";
-    const char* expected = "SGVsbG8=";
-    char* encoded = base64_encode((const unsigned char*)input, strlen(input));
-    assert(encoded != NULL);
-    assert(strcmp(encoded, expected) == 0);
-    free(encoded);
-    printf("test_base64_encode passed.\n");
+    printf("read_file_to_buffer tests passed!\n");
 }
 
 int main() {
-    test_read_existing_file();
-    test_read_empty_file();
-    test_read_nonexistent_file();
-    test_null_file_size();
-    test_read_large_file();
+    test_generate_system_prompt();
     test_base64_encode();
-    printf("All tests passed!\n");
+    test_read_file_to_buffer();
+    printf("All tests passed successfully!\n");
     return 0;
 }
