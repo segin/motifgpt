@@ -1308,48 +1308,65 @@ static void numeric_verify_cb(Widget w, XtPointer client_data, XtPointer call_da
 }
 
 void render_all_history() {
-    XmTextSetString(conversation_text, ""); // Clear view
+    // 1. Calculate required buffer size
+    size_t total_len = 0;
     for (int i = 0; i < chat_history_count; i++) {
         const char* nick = (chat_history[i].role == DP_ROLE_USER) ? USER_NICKNAME : ASSISTANT_NICKNAME;
-        char line_buffer[8192];
-        snprintf(line_buffer, sizeof(line_buffer), "%s: ", nick);
-
-        size_t current_len = strlen(line_buffer);
-        size_t buffer_size = sizeof(line_buffer);
+        total_len += strlen(nick) + 2; // "Nick: "
 
         for (size_t j = 0; j < chat_history[i].num_parts; j++) {
             dp_content_part_t* part = &chat_history[i].parts[j];
-            const char* text_to_append = NULL;
-
             if (part->type == DP_CONTENT_PART_TEXT) {
-                text_to_append = part->text;
+                if (part->text) total_len += strlen(part->text);
             } else if (part->type == DP_CONTENT_PART_IMAGE_BASE64) {
-                text_to_append = " [Image Attached]";
+                total_len += strlen(" [Image Attached]");
             }
+        }
+        total_len += 1; // "\n"
+    }
 
-            if (text_to_append) {
-                size_t remaining = buffer_size - current_len;
-                if (remaining > 1) {
-                    int ret = snprintf(line_buffer + current_len, remaining, "%s", text_to_append);
-                    if (ret > 0) {
-                        if ((size_t)ret >= remaining) {
-                             current_len = buffer_size - 1;
-                        } else {
-                             current_len += ret;
-                        }
-                    }
-                }
+    // 2. Allocate buffer
+    char* full_history = malloc(total_len + 1);
+    if (!full_history) {
+        perror("malloc render_all_history");
+        return;
+    }
+
+    // 3. Construct string
+    char* current_pos = full_history;
+    for (int i = 0; i < chat_history_count; i++) {
+        const char* nick = (chat_history[i].role == DP_ROLE_USER) ? USER_NICKNAME : ASSISTANT_NICKNAME;
+
+        size_t nick_len = strlen(nick);
+        memcpy(current_pos, nick, nick_len);
+        current_pos += nick_len;
+        memcpy(current_pos, ": ", 2);
+        current_pos += 2;
+
+        for (size_t j = 0; j < chat_history[i].num_parts; j++) {
+            dp_content_part_t* part = &chat_history[i].parts[j];
+            if (part->type == DP_CONTENT_PART_TEXT && part->text) {
+                size_t text_len = strlen(part->text);
+                memcpy(current_pos, part->text, text_len);
+                current_pos += text_len;
+            } else if (part->type == DP_CONTENT_PART_IMAGE_BASE64) {
+                 const char* img_msg = " [Image Attached]";
+                 size_t img_len = strlen(img_msg);
+                 memcpy(current_pos, img_msg, img_len);
+                 current_pos += img_len;
             }
         }
-        if (current_len < buffer_size - 1) {
-            line_buffer[current_len++] = '\n';
-            line_buffer[current_len] = '\0';
-        }
-        append_to_conversation_ex(line_buffer, False);
+        *current_pos = '\n';
+        current_pos++;
     }
-    if (conversation_text && XtIsManaged(conversation_text)) {
-        XmTextShowPosition(conversation_text, XmTextGetLastPosition(conversation_text));
-    }
+    *current_pos = '\0';
+
+    // 4. Update UI once
+    XmTextSetString(conversation_text, full_history);
+    XmTextShowPosition(conversation_text, XmTextGetLastPosition(conversation_text));
+
+    // 5. Cleanup
+    free(full_history);
 }
 
 
