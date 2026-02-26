@@ -1,12 +1,12 @@
-#include "../utils.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
-#include <unistd.h>
 #include <time.h>
+#include "../utils.h"
 
 void test_generate_system_prompt() {
+    printf("Testing generate_system_prompt...\n");
     char buffer[4096];
     char dateStr[80];
     time_t now = time(0);
@@ -28,60 +28,91 @@ void test_generate_system_prompt() {
     assert(strstr(buffer, dateStr) != NULL);
     assert(strstr(buffer, "Custom Prompt") != NULL);
 
-    printf("test_generate_system_prompt passed.\n");
+    printf("test_generate_system_prompt passed!\n");
 }
 
 void test_base64_encode() {
-    const char* input = "Hello World";
-    char* encoded = base64_encode((unsigned char*)input, strlen(input));
-    // "Hello World" -> "SGVsbG8gV29ybGQ="
-    assert(strcmp(encoded, "SGVsbG8gV29ybGQ=") == 0);
-    free(encoded);
+    printf("Testing base64_encode...\n");
 
-    const char* input2 = "A";
-    char* encoded2 = base64_encode((unsigned char*)input2, strlen(input2));
-    // "A" -> "QQ=="
-    assert(strcmp(encoded2, "QQ==") == 0);
-    free(encoded2);
+    struct {
+        const char* input;
+        const char* expected;
+    } cases[] = {
+        {"", ""},
+        {"f", "Zg=="},
+        {"fo", "Zm8="},
+        {"foo", "Zm9v"},
+        {"foob", "Zm9vYg=="},
+        {"fooba", "Zm9vYmE="},
+        {"foobar", "Zm9vYmFy"},
+        {NULL, NULL}
+    };
 
-    printf("test_base64_encode passed.\n");
+    for (int i = 0; cases[i].input != NULL; i++) {
+        char* encoded = base64_encode((const unsigned char*)cases[i].input, strlen(cases[i].input));
+        assert(encoded != NULL);
+        if (strcmp(encoded, cases[i].expected) != 0) {
+            fprintf(stderr, "Case %d failed: input='%s', expected='%s', got='%s'\n", i, cases[i].input, cases[i].expected, encoded);
+            exit(1);
+        }
+        free(encoded);
+    }
+    printf("base64_encode tests passed!\n");
 }
 
 void test_read_file_to_buffer() {
-    const char* filename = "test_file.txt";
-    const char* content = "Test Content";
-    FILE* f = fopen(filename, "wb");
+    printf("Testing read_file_to_buffer...\n");
+
+    // 1. Test reading a normal file
+    const char* test_file = "test_normal.txt";
+    const char* content = "Hello, Base64!";
+    FILE* f = fopen(test_file, "wb");
     fwrite(content, 1, strlen(content), f);
     fclose(f);
 
     size_t size;
-    unsigned char* buffer = read_file_to_buffer(filename, &size);
+    unsigned char* buffer = read_file_to_buffer(test_file, &size);
     assert(buffer != NULL);
     assert(size == strlen(content));
     assert(memcmp(buffer, content, size) == 0);
     free(buffer);
+    remove(test_file);
 
-    unlink(filename);
-
-    // Test empty file
-    const char* empty_filename = "empty_file.txt";
-    f = fopen(empty_filename, "wb");
+    // 2. Test reading an empty file
+    const char* empty_file = "test_empty.txt";
+    f = fopen(empty_file, "wb");
     fclose(f);
 
-    buffer = read_file_to_buffer(empty_filename, &size);
+    buffer = read_file_to_buffer(empty_file, &size);
     assert(buffer != NULL);
     assert(size == 0);
-    // Since we malloc(1) for empty file, buffer is valid pointer
     free(buffer);
+    remove(empty_file);
 
-    unlink(empty_filename);
+    // 3. Test non-existent file
+    buffer = read_file_to_buffer("non_existent.txt", &size);
+    assert(buffer == NULL);
 
-    printf("test_read_file_to_buffer passed.\n");
+    // 4. Test file too large (simulated by creating a file > 20MB)
+    const char* large_file = "test_large.txt";
+    f = fopen(large_file, "wb");
+    if (f) {
+        fseek(f, 20 * 1024 * 1024 + 1024, SEEK_SET);
+        fputc(0, f);
+        fclose(f);
+
+        buffer = read_file_to_buffer(large_file, &size);
+        assert(buffer == NULL);
+        remove(large_file);
+    }
+
+    printf("read_file_to_buffer tests passed!\n");
 }
 
 int main() {
     test_generate_system_prompt();
     test_base64_encode();
     test_read_file_to_buffer();
+    printf("All tests passed successfully!\n");
     return 0;
 }

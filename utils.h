@@ -1,15 +1,13 @@
-#ifndef MOTIFGPT_UTILS_H
-#define MOTIFGPT_UTILS_H
+#ifndef UTILS_H
+#define UTILS_H
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
+#include <stddef.h>
 #include <stdbool.h>
+
+#define MAX_FILE_SIZE_BYTES (20 * 1024 * 1024)
 
 /**
  * Generates the system prompt for the LLM.
- *
  * @param buffer The buffer to store the generated prompt.
  * @param buffer_size The size of the buffer.
  * @param custom_prompt The user-defined system prompt.
@@ -19,20 +17,18 @@ void generate_system_prompt(char *buffer, size_t buffer_size, const char *custom
 
 /**
  * Reads a file into a newly allocated buffer.
- *
- * @param filename The path to the file.
- * @param file_size A pointer to store the size of the file.
- * @return A pointer to the buffer containing the file content, or NULL on error.
+ * @param filename Path to the file.
+ * @param file_size Pointer to store the size of the read file.
+ * @return Pointer to the allocated buffer, or NULL on failure.
  */
 unsigned char* read_file_to_buffer(const char* filename, size_t* file_size);
 
 /**
- * Encodes data to Base64.
- *
- * @param data The data to encode.
- * @param input_length The length of the data.
- * @return A newly allocated string containing the Base64 encoded data, or NULL on error.
+ * Encodes data into Base64 format.
+ * @param data Data to encode.
+ * @param input_length Length of the input data.
+ * @return Pointer to the null-terminated Base64 string, or NULL on failure.
  */
 char* base64_encode(const unsigned char *data, size_t input_length);
 
-#endif // MOTIFGPT_UTILS_H
+#endif /* UTILS_H */

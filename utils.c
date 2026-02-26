@@ -1,6 +1,9 @@
 #include "utils.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <stdint.h>
-#include <ctype.h>
+#include <time.h>
 
 void generate_system_prompt(char *buffer, size_t buffer_size, const char *custom_prompt, bool append_default) {
     char default_prompt[512];
@@ -32,19 +35,16 @@ unsigned char* read_file_to_buffer(const char* filename, size_t* file_size) {
     FILE* f = fopen(filename, "rb");
     if (!f) { perror("fopen read_file"); return NULL; }
     fseek(f, 0, SEEK_END); long size = ftell(f);
-    if (size < 0 || size > 20 * 1024 * 1024) {
-        fclose(f); fprintf(stderr, "File too large (max 20MB) or ftell error.\n"); return NULL;
+    if (size < 0 || size > MAX_FILE_SIZE_BYTES) {
+        fclose(f); fprintf(stderr, "File too large (max %dMB) or ftell error.\n", (int)(MAX_FILE_SIZE_BYTES / (1024 * 1024))); return NULL;
     }
     *file_size = (size_t)size; fseek(f, 0, SEEK_SET);
-
-    // Allocate at least 1 byte if file is empty to avoid implementation-defined malloc(0) behavior
-    size_t alloc_size = (*file_size > 0) ? *file_size : 1;
-    unsigned char* buffer = malloc(alloc_size);
-
+    unsigned char* buffer = malloc(*file_size ? *file_size : 1);
     if (!buffer) { fclose(f); perror("malloc read_file"); return NULL; }
-
-    if (*file_size > 0 && fread(buffer, 1, *file_size, f) != *file_size) {
-        fclose(f); free(buffer); fprintf(stderr, "fread error.\n"); return NULL;
+    if (*file_size > 0) {
+        if (fread(buffer, 1, *file_size, f) != *file_size) {
+            fclose(f); free(buffer); fprintf(stderr, "fread error.\n"); return NULL;
+        }
     }
     fclose(f); return buffer;
 }
