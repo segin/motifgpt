@@ -2,8 +2,18 @@
 #define UTILS_H
 
 #include <stddef.h>
+#include <stdbool.h>
 
 #define MAX_FILE_SIZE_BYTES (20 * 1024 * 1024)
+
+/**
+ * Generates the system prompt for the LLM.
+ * @param buffer The buffer to store the generated prompt.
+ * @param buffer_size The size of the buffer.
+ * @param custom_prompt The user-defined system prompt.
+ * @param append_default Whether to append the default prompt to the custom prompt.
+ */
+void generate_system_prompt(char *buffer, size_t buffer_size, const char *custom_prompt, bool append_default);
 
 /**
  * Reads a file into a newly allocated buffer.

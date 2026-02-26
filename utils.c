@@ -3,6 +3,33 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <time.h>
+
+void generate_system_prompt(char *buffer, size_t buffer_size, const char *custom_prompt, bool append_default) {
+    char default_prompt[512];
+    time_t now = time(0);
+    struct tm* ltm = localtime(&now);
+    char dateStr[80];
+    strftime(dateStr, sizeof(dateStr), "%A, %B %d, %Y", ltm);
+    snprintf(default_prompt, sizeof(default_prompt),
+             "- You are MotifGPT, an assistant whose client program runs on UNIX with the Motif toolkit.\n"
+             "- The current date is %s.\n"
+             "- The user's environment does not format Markdown. Do not produce any Markdown unless the user explicitly requests it.",
+             dateStr);
+
+    if (custom_prompt == NULL || strlen(custom_prompt) == 0) {
+        strncpy(buffer, default_prompt, buffer_size - 1);
+        buffer[buffer_size - 1] = '\0';
+    } else {
+        if (append_default) {
+            snprintf(buffer, buffer_size,
+                     "%s\n\n%s", default_prompt, custom_prompt);
+        } else {
+            strncpy(buffer, custom_prompt, buffer_size - 1);
+            buffer[buffer_size - 1] = '\0';
+        }
+    }
+}
 
 unsigned char* read_file_to_buffer(const char* filename, size_t* file_size) {
     FILE* f = fopen(filename, "rb");

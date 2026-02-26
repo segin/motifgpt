@@ -2,7 +2,34 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <time.h>
 #include "../utils.h"
+
+void test_generate_system_prompt() {
+    printf("Testing generate_system_prompt...\n");
+    char buffer[4096];
+    char dateStr[80];
+    time_t now = time(0);
+    struct tm* ltm = localtime(&now);
+    strftime(dateStr, sizeof(dateStr), "%A, %B %d, %Y", ltm);
+
+    // Case 1: Default prompt only
+    generate_system_prompt(buffer, sizeof(buffer), NULL, true);
+    assert(strstr(buffer, "You are MotifGPT") != NULL);
+    assert(strstr(buffer, dateStr) != NULL);
+
+    // Case 2: Custom prompt only
+    generate_system_prompt(buffer, sizeof(buffer), "Custom Prompt", false);
+    assert(strcmp(buffer, "Custom Prompt") == 0);
+
+    // Case 3: Appended prompt
+    generate_system_prompt(buffer, sizeof(buffer), "Custom Prompt", true);
+    assert(strstr(buffer, "You are MotifGPT") != NULL);
+    assert(strstr(buffer, dateStr) != NULL);
+    assert(strstr(buffer, "Custom Prompt") != NULL);
+
+    printf("test_generate_system_prompt passed!\n");
+}
 
 void test_base64_encode() {
     printf("Testing base64_encode...\n");
@@ -67,8 +94,6 @@ void test_read_file_to_buffer() {
     assert(buffer == NULL);
 
     // 4. Test file too large (simulated by creating a file > 20MB)
-    // Actually, creating a 20MB+ file might be slow and consume space.
-    // Let's create a 21MB file to test the limit.
     const char* large_file = "test_large.txt";
     f = fopen(large_file, "wb");
     if (f) {
@@ -85,6 +110,7 @@ void test_read_file_to_buffer() {
 }
 
 int main() {
+    test_generate_system_prompt();
     test_base64_encode();
     test_read_file_to_buffer();
     printf("All tests passed successfully!\n");
