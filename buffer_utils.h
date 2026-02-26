@@ -2,22 +2,30 @@
 #define BUFFER_UTILS_H
 
 #include <stddef.h>
-#include <stdint.h>
-#include <stdio.h>
 
-/*
- * Encodes data to Base64.
- * Returns a null-terminated string which must be freed by the caller.
- * Returns NULL on allocation failure.
+extern char *current_assistant_response_buffer;
+extern size_t current_assistant_response_len;
+extern size_t current_assistant_response_capacity;
+
+/**
+ * Initializes the assistant response buffer.
  */
-char* base64_encode(const unsigned char *data, size_t input_length);
+void init_assistant_buffer();
 
-/*
- * Reads a file into a buffer.
- * Returns a buffer which must be freed by the caller.
- * Sets file_size to the number of bytes read.
- * Returns NULL on error (file not found, too large, etc.).
+/**
+ * Frees the assistant response buffer.
  */
-unsigned char* read_file_to_buffer(const char* filename, size_t* file_size);
+void free_assistant_buffer();
 
-#endif
+/**
+ * Resets the assistant response buffer without freeing it.
+ */
+void reset_assistant_buffer();
+
+/**
+ * Appends text to the assistant response buffer, with overflow protection.
+ * @param text The text to append.
+ */
+void append_to_assistant_buffer(const char* text);
+
+#endif /* BUFFER_UTILS_H */

@@ -4,9 +4,7 @@ AM_INIT_AUTOMAKE([foreign -Wall -Werror subdir-objects])
 AC_PROG_CC
 
 # Checks for libraries.
-AC_CHECK_LIB([pthread], [pthread_create], [PTHREAD_LIBS="-lpthread"], [AC_MSG_ERROR([pthread not found])])
-AC_SUBST(PTHREAD_LIBS)
-AC_SUBST(PTHREAD_CFLAGS)
+AX_PTHREAD
 
 AC_PATH_XTRA
 if test "x$no_x" = xyes; then
