@@ -27,6 +27,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -43,6 +44,8 @@
 
 #include "disasterparty.h"
 #include <curl/curl.h>
+#include "utils.h"
+#include "motifgpt_config.h"
 
 // --- Configuration ---
 #define DEFAULT_PROVIDER DP_PROVIDER_GOOGLE_GEMINI
@@ -60,6 +63,22 @@
 #define CONFIG_DIR_MODE 0755
 #define CONFIG_FILE_NAME "settings.conf"
 #define CACHE_DIR_NAME "cache"
+
+// UI Spacing
+#define UI_SPACING_SMALL 2
+#define UI_SPACING_MEDIUM 5
+#define UI_SPACING_LARGE 10
+#define UI_SPACING_XLARGE 15
+
+// Buffer sizes
+#define API_KEY_BUF_SIZE 256
+#define MODEL_ID_BUF_SIZE 128
+#define API_URL_BUF_SIZE 256
+#define SYSTEM_PROMPT_BUF_SIZE 2048
+#define THREAD_SYSTEM_PROMPT_BUF_SIZE (SYSTEM_PROMPT_BUF_SIZE * 2)
+#define DISPLAY_MSG_BUF_SIZE (2048 + PATH_MAX)
+#define DEFAULT_MAX_TOKENS 2048
+
 // --- End Configuration ---
 
 // Globals
@@ -86,17 +105,17 @@ Widget system_prompt_text;
 Widget append_prompt_toggle;
 
 dp_provider_type_t current_api_provider = DEFAULT_PROVIDER;
-char current_gemini_api_key[256] = "";
-char current_gemini_model[128] = DEFAULT_GEMINI_MODEL;
-char current_openai_api_key[256] = "";
-char current_openai_model[128] = DEFAULT_OPENAI_MODEL;
-char current_openai_base_url[256] = "";
-char current_anthropic_api_key[256] = "";
-char current_anthropic_model[128] = DEFAULT_ANTHROPIC_MODEL;
+char current_gemini_api_key[API_KEY_BUF_SIZE] = "";
+char current_gemini_model[MODEL_ID_BUF_SIZE] = DEFAULT_GEMINI_MODEL;
+char current_openai_api_key[API_KEY_BUF_SIZE] = "";
+char current_openai_model[MODEL_ID_BUF_SIZE] = DEFAULT_OPENAI_MODEL;
+char current_openai_base_url[API_URL_BUF_SIZE] = "";
+char current_anthropic_api_key[API_KEY_BUF_SIZE] = "";
+char current_anthropic_model[MODEL_ID_BUF_SIZE] = DEFAULT_ANTHROPIC_MODEL;
 int current_max_history_messages = DEFAULT_MAX_HISTORY_MESSAGES;
 Boolean history_limits_disabled = False;
 Boolean enter_key_sends_message = True;
-char current_system_prompt[2048] = "";
+char current_system_prompt[SYSTEM_PROMPT_BUF_SIZE] = "";
 Boolean append_default_system_prompt = True;
 
 char attached_image_path[PATH_MAX] = "";
@@ -123,8 +142,8 @@ typedef enum {
     PIPE_MSG_MODEL_LIST_ITEM, PIPE_MSG_MODEL_LIST_END, PIPE_MSG_MODEL_LIST_ERROR
 } pipe_message_type_t;
 typedef struct { pipe_message_type_t type; char data[512]; } pipe_message_t;
-typedef struct { dp_request_config_t config; char system_prompt_buffer[4096]; } llm_thread_data_t;
-typedef struct { dp_provider_type_t provider; char api_key_for_list[256]; char base_url_for_list[256]; } get_models_thread_data_t;
+typedef struct { dp_request_config_t config; char system_prompt_buffer[THREAD_SYSTEM_PROMPT_BUF_SIZE]; char temp_history_filename[PATH_MAX]; } llm_thread_data_t;
+typedef struct { dp_provider_type_t provider; char api_key_for_list[API_KEY_BUF_SIZE]; char base_url_for_list[API_URL_BUF_SIZE]; } get_models_thread_data_t;
 
 // Function Prototypes
 void send_message_callback(Widget, XtPointer, XtPointer);
@@ -137,13 +156,13 @@ static void app_text_key_press_handler(Widget, XtPointer, XEvent*, Boolean*);
 static void focus_callback(Widget, XtPointer, XtPointer);
 static void settings_text_field_focus_in_cb(Widget, XtPointer, XtPointer);
 static void settings_text_field_focus_out_cb(Widget, XtPointer, XtPointer);
+static int ends_with_ignore_case(const char *str, const char *suffix);
 void clear_chat_callback(Widget, XtPointer, XtPointer);
 void add_message_to_history(dp_message_role_t, const char*, const char*, const char*);
 void free_chat_history();
 void remove_oldest_history_messages(int);
 void *perform_llm_request_thread(void*);
 void initialize_dp_context();
-char* get_config_path(const char*);
 int ensure_config_dir_exists();
 void load_settings();
 void save_settings();
@@ -154,6 +173,8 @@ void save_chat_as_callback(Widget, XtPointer, XtPointer);
 void file_selection_open_ok_callback(Widget, XtPointer, XtPointer);
 void file_selection_save_as_ok_callback(Widget, XtPointer, XtPointer);
 void render_all_history();
+void append_to_conversation(const char* text);
+void append_to_conversation_ex(const char* text, Boolean scroll);
 unsigned char* read_file_to_buffer(const char*, size_t*);
 char* base64_encode(const unsigned char*, size_t);
 static void popup_handler(Widget, XtPointer, XEvent*, Boolean*);
@@ -163,36 +184,60 @@ static void numeric_verify_cb(Widget, XtPointer, XtPointer);
 void cut_callback(Widget, XtPointer, XtPointer); void copy_callback(Widget, XtPointer, XtPointer);
 void paste_callback(Widget, XtPointer, XtPointer); void select_all_callback(Widget, XtPointer, XtPointer);
 void settings_callback(Widget, XtPointer, XtPointer); void settings_tab_change_callback(Widget, XtPointer, XtPointer);
-void create_general_tab(Widget parent); void create_gemini_tab(Widget parent);
-void create_openai_tab(Widget parent); void create_anthropic_tab(Widget parent);
 void settings_apply_callback(Widget, XtPointer, XtPointer); void settings_ok_callback(Widget, XtPointer, XtPointer);
 void settings_cancel_callback(Widget, XtPointer, XtPointer); void settings_get_models_callback(Widget, XtPointer, XtPointer);
 void *perform_get_models_thread(void*); void settings_use_selected_model_callback(Widget, XtPointer, XtPointer);
 void populate_settings_dialog(); void retrieve_settings_from_dialog();
+void create_general_tab(Widget parent); void create_gemini_tab(Widget parent);
+void create_openai_tab(Widget parent); void create_anthropic_tab(Widget parent);
 void settings_disable_history_limit_toggle_cb(Widget, XtPointer, XtPointer);
 static void openai_base_url_focus_in_cb(Widget, XtPointer, XtPointer);
 static void openai_base_url_focus_out_cb(Widget, XtPointer, XtPointer);
 
 
-void append_to_conversation(const char* text) {
+void append_to_conversation_ex(const char* text, Boolean scroll) {
     if (!conversation_text || !XtIsManaged(conversation_text)) return;
     XmTextPosition pos = XmTextGetLastPosition(conversation_text);
     XmTextInsert(conversation_text, pos, (char*)text);
-    XmTextShowPosition(conversation_text, XmTextGetLastPosition(conversation_text));
+    if (scroll) {
+        XmTextShowPosition(conversation_text, XmTextGetLastPosition(conversation_text));
+    }
+}
+
+void append_to_conversation(const char* text) {
+    append_to_conversation_ex(text, True);
 }
 
 void append_to_assistant_buffer(const char* text) {
     if (!text) return;
     size_t len = strlen(text);
-    if (current_assistant_response_len + len + 1 > current_assistant_response_capacity) {
-        current_assistant_response_capacity = (current_assistant_response_len + len + 1) * 2;
-        char *new_buf = realloc(current_assistant_response_buffer, current_assistant_response_capacity);
+    if (len > SIZE_MAX - current_assistant_response_len - 1) {
+        fprintf(stderr, "Assistant buffer overflow: total length would exceed SIZE_MAX\n");
+        return;
+    }
+    size_t needed = current_assistant_response_len + len + 1;
+    if (needed > current_assistant_response_capacity) {
+        size_t new_capacity = needed;
+        if (new_capacity <= SIZE_MAX / 2) {
+            new_capacity *= 2;
+        } else {
+            new_capacity = SIZE_MAX;
+        }
+        char *new_buf = realloc(current_assistant_response_buffer, new_capacity);
+        if (!new_buf) {
+            // If doubling failed, try to allocate just what we need
+            if (new_capacity > needed) {
+                new_capacity = needed;
+                new_buf = realloc(current_assistant_response_buffer, new_capacity);
+            }
+        }
         if (!new_buf) {
             perror("realloc assistant_buffer"); free(current_assistant_response_buffer);
             current_assistant_response_buffer = NULL; current_assistant_response_len = 0; current_assistant_response_capacity = 0;
             return;
         }
         current_assistant_response_buffer = new_buf;
+        current_assistant_response_capacity = new_capacity;
     }
     memcpy(current_assistant_response_buffer + current_assistant_response_len, text, len);
     current_assistant_response_len += len;
@@ -298,13 +343,7 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
     }
 }
 
-void remove_oldest_history_messages(int count_to_remove) {
-    if (count_to_remove <= 0 || count_to_remove > chat_history_count) return;
-    for (int i = 0; i < count_to_remove; ++i) dp_free_messages(&chat_history[i], 1);
-    int remaining_count = chat_history_count - count_to_remove;
-    if (remaining_count > 0) memmove(chat_history, &chat_history[count_to_remove], remaining_count * sizeof(dp_message_t));
-    chat_history_count = remaining_count;
-}
+#include "motifgpt_history.c"
 
 void add_message_to_history(dp_message_role_t role, const char* text_content, const char* img_mime_type, const char* img_base64_data) {
     int effective_max_history = history_limits_disabled ? INTERNAL_MAX_HISTORY_CAPACITY : current_max_history_messages;
@@ -357,6 +396,24 @@ void free_chat_history() {
 void *perform_llm_request_thread(void *arg) {
     llm_thread_data_t *thread_data = (llm_thread_data_t *)arg;
     dp_response_t response_status = {0};
+
+    // Deserialize chat history from temp file
+    if (strlen(thread_data->temp_history_filename) > 0) {
+        dp_message_t *loaded_messages = NULL;
+        size_t num_loaded = 0;
+        if (dp_deserialize_messages_from_file(thread_data->temp_history_filename, &loaded_messages, &num_loaded) == 0) {
+            thread_data->config.messages = loaded_messages;
+            thread_data->config.num_messages = num_loaded;
+            unlink(thread_data->temp_history_filename); // Remove file immediately after loading
+        } else {
+             write_pipe_message(PIPE_MSG_ERROR, "Failed to load chat history for request.");
+             unlink(thread_data->temp_history_filename);
+             free(thread_data);
+             pthread_detach(pthread_self());
+             return NULL;
+        }
+    }
+
     printf("Thread: LLM request with %d messages.\n", (int)thread_data->config.num_messages);
 
     // Point the config's system_prompt to the buffer inside the struct
@@ -374,6 +431,13 @@ void *perform_llm_request_thread(void *arg) {
         write_pipe_message(PIPE_MSG_ERROR, err_buf);
     }
     dp_free_response_content(&response_status);
+
+    // Free the thread-specific history
+    if (thread_data->config.messages) {
+        dp_free_messages(thread_data->config.messages, thread_data->config.num_messages);
+        free(thread_data->config.messages);
+    }
+
     free(thread_data);
     pthread_detach(pthread_self());
     return NULL;
@@ -404,14 +468,14 @@ void start_llm_request() {
     } else {
          snprintf(display_msg_text_part, sizeof(display_msg_text_part), "%s: ", USER_NICKNAME);
     }
-    char full_display_msg[2048]; strcpy(full_display_msg, display_msg_text_part);
+    char full_display_msg[DISPLAY_MSG_BUF_SIZE]; strcpy(full_display_msg, display_msg_text_part);
     if (attached_image_base64_data) {
-        char image_indicator[FILENAME_MAX + 50];
         char path_copy[PATH_MAX]; strncpy(path_copy, attached_image_path, PATH_MAX); path_copy[PATH_MAX-1] = '\0';
-        snprintf(image_indicator, sizeof(image_indicator), " [Image Attached: %s]", basename(path_copy));
-        strcat(full_display_msg, image_indicator);
+        snprintf(full_display_msg, sizeof(full_display_msg), "%s [Image Attached: %s]\n", display_msg_text_part, basename(path_copy));
+    } else {
+        snprintf(full_display_msg, sizeof(full_display_msg), "%s\n", display_msg_text_part);
     }
-    strcat(full_display_msg, "\n"); append_to_conversation(full_display_msg);
+    append_to_conversation(full_display_msg);
     add_message_to_history(DP_ROLE_USER, input_string_raw ? input_string_raw : "",
                            attached_image_base64_data ? attached_image_mime_type : NULL,
                            attached_image_base64_data);
@@ -434,40 +498,45 @@ void start_llm_request() {
         thread_data->config.model = current_anthropic_model;
     }
 
-    // --- System Prompt Logic (ported from BeGPT) ---
-    char default_prompt[512];
-    time_t now = time(0);
-    struct tm* ltm = localtime(&now);
-    char dateStr[80];
-    strftime(dateStr, sizeof(dateStr), "%A, %B %d, %Y", ltm);
-    snprintf(default_prompt, sizeof(default_prompt),
-             "- You are MotifGPT, an assistant whose client program runs on UNIX with the Motif toolkit.\n"
-             "- The current date is %s.\n"
-             "- The user's environment does not format Markdown. Do not produce any Markdown unless the user explicitly requests it.",
-             dateStr);
-
-    if (strlen(current_system_prompt) == 0) {
-        strncpy(thread_data->system_prompt_buffer, default_prompt, sizeof(thread_data->system_prompt_buffer) - 1);
-    } else {
-        if (append_default_system_prompt) {
-            snprintf(thread_data->system_prompt_buffer, sizeof(thread_data->system_prompt_buffer),
-                     "%s\n\n%s", default_prompt, current_system_prompt);
-        } else {
-            strncpy(thread_data->system_prompt_buffer, current_system_prompt, sizeof(thread_data->system_prompt_buffer) - 1);
-        }
-    }
+    generate_system_prompt(thread_data->system_prompt_buffer, sizeof(thread_data->system_prompt_buffer), current_system_prompt, append_default_system_prompt);
     // The config.system_prompt pointer will be set inside the thread to point to system_prompt_buffer.
     // This avoids passing a pointer to a stack variable to the new thread.
 
-    thread_data->config.temperature = 0.7; thread_data->config.max_tokens = 2048;
+    thread_data->config.temperature = 0.7; thread_data->config.max_tokens = DEFAULT_MAX_TOKENS;
     thread_data->config.stream = true;
-    thread_data->config.messages = chat_history;
-    thread_data->config.num_messages = chat_history_count;
+
+    // Serialize chat history to temp file to avoid race condition.
+    // We use file serialization because dp_message_t is opaque and we cannot safely deep-copy it in memory without library headers.
+    char temp_filename[PATH_MAX];
+    strcpy(temp_filename, "/tmp/motifgpt_hist_XXXXXX");
+    int fd = mkstemp(temp_filename);
+    if (fd != -1) {
+        close(fd);
+        if (dp_serialize_messages_to_file(chat_history, chat_history_count, temp_filename) == 0) {
+             strncpy(thread_data->temp_history_filename, temp_filename, PATH_MAX - 1);
+             thread_data->temp_history_filename[PATH_MAX - 1] = '\0';
+             thread_data->config.messages = NULL; // Will be loaded in thread
+             thread_data->config.num_messages = 0;
+        } else {
+             perror("dp_serialize_messages_to_file");
+             unlink(temp_filename);
+             free(thread_data);
+             show_error_dialog("Failed to serialize chat history for thread.");
+             return;
+        }
+    } else {
+        perror("mkstemp");
+        free(thread_data);
+        show_error_dialog("Failed to create temp file for history.");
+        return;
+    }
 
     snprintf(current_assistant_prefix, sizeof(current_assistant_prefix), "%s: ", ASSISTANT_NICKNAME);
     pthread_t tid;
     if (pthread_create(&tid, NULL, perform_llm_request_thread, thread_data) != 0) {
-        perror("pthread_create llm_request"); free(thread_data);
+        perror("pthread_create llm_request");
+        if (strlen(thread_data->temp_history_filename) > 0) unlink(thread_data->temp_history_filename);
+        free(thread_data);
         show_error_dialog("Failed to start LLM request thread.");
     }
 }
@@ -713,28 +782,6 @@ Widget create_text_popup_menu(Widget parent_for_menu_shell) {
     return menu;
 }
 
-char* get_config_path(const char* filename) {
-    static char path[PATH_MAX]; wordexp_t p; char *env_path;
-    if (filename == NULL) filename = "";
-    env_path = getenv("XDG_CONFIG_HOME");
-    if (env_path && env_path[0]) {
-        snprintf(path, sizeof(path), "%s/motifgpt/%s", env_path, filename);
-    } else {
-        env_path = getenv("HOME");
-        if (!env_path || !env_path[0]) {
-            fprintf(stderr, "Error: HOME env var not set.\n"); return NULL;
-        }
-        snprintf(path, sizeof(path), "%s/.config/motifgpt/%s", env_path, filename);
-    }
-    if (path[0] == '~') {
-        if (wordexp(path, &p, 0) == 0) {
-            if (p.we_wordc > 0) strncpy(path, p.we_wordv[0], sizeof(path) - 1);
-            path[sizeof(path) - 1] = '\0'; wordfree(&p);
-        } else { fprintf(stderr, "wordexp failed for path: %s\n", path); }
-    }
-    return path;
-}
-
 int ensure_config_dir_exists() {
     char *base_dir_path_ptr = get_config_path(""); if (!base_dir_path_ptr) return -1;
     char base_dir_path[PATH_MAX]; strncpy(base_dir_path, base_dir_path_ptr, PATH_MAX -1); base_dir_path[PATH_MAX-1] = '\0';
@@ -764,8 +811,8 @@ void load_settings() {
     FILE *fp = fopen(settings_file, "r");
     if (!fp) {
         printf("No settings file (%s). Using defaults/environment variables.\n", settings_file);
-        const char* ge = getenv("GEMINI_API_KEY"); if (ge) strncpy(current_gemini_api_key, ge, sizeof(current_gemini_api_key)-1); else current_gemini_api_key[0] = '\0';
-        const char* oe = getenv("OPENAI_API_KEY"); if (oe) strncpy(current_openai_api_key, oe, sizeof(current_openai_api_key)-1); else current_openai_api_key[0] = '\0';
+        const char* ge = getenv("GEMINI_API_KEY"); if (ge) snprintf(current_gemini_api_key, sizeof(current_gemini_api_key), "%s", ge); else current_gemini_api_key[0] = '\0';
+        const char* oe = getenv("OPENAI_API_KEY"); if (oe) snprintf(current_openai_api_key, sizeof(current_openai_api_key), "%s", oe); else current_openai_api_key[0] = '\0';
         current_max_history_messages = DEFAULT_MAX_HISTORY_MESSAGES;
         history_limits_disabled = False;
         enter_key_sends_message = True;
@@ -779,15 +826,15 @@ void load_settings() {
                 if (strcmp(value, "gemini") == 0) current_api_provider = DP_PROVIDER_GOOGLE_GEMINI;
                 else if (strcmp(value, "openai") == 0) current_api_provider = DP_PROVIDER_OPENAI_COMPATIBLE;
                 else if (strcmp(value, "anthropic") == 0) current_api_provider = DP_PROVIDER_ANTHROPIC;
-            } else if (strcmp(key, "gemini_api_key") == 0) strncpy(current_gemini_api_key, value, sizeof(current_gemini_api_key)-1);
-            else if (strcmp(key, "gemini_model") == 0) strncpy(current_gemini_model, value, sizeof(current_gemini_model)-1);
-            else if (strcmp(key, "openai_api_key") == 0) strncpy(current_openai_api_key, value, sizeof(current_openai_api_key)-1);
-            else if (strcmp(key, "openai_model") == 0) strncpy(current_openai_model, value, sizeof(current_openai_model)-1);
-            else if (strcmp(key, "openai_base_url") == 0) strncpy(current_openai_base_url, value, sizeof(current_openai_base_url)-1);
-            else if (strcmp(key, "anthropic_api_key") == 0) strncpy(current_anthropic_api_key, value, sizeof(current_anthropic_api_key)-1);
-            else if (strcmp(key, "anthropic_model") == 0) strncpy(current_anthropic_model, value, sizeof(current_anthropic_model)-1);
+            } else if (strcmp(key, "gemini_api_key") == 0) snprintf(current_gemini_api_key, sizeof(current_gemini_api_key), "%s", value);
+            else if (strcmp(key, "gemini_model") == 0) snprintf(current_gemini_model, sizeof(current_gemini_model), "%s", value);
+            else if (strcmp(key, "openai_api_key") == 0) snprintf(current_openai_api_key, sizeof(current_openai_api_key), "%s", value);
+            else if (strcmp(key, "openai_model") == 0) snprintf(current_openai_model, sizeof(current_openai_model), "%s", value);
+            else if (strcmp(key, "openai_base_url") == 0) snprintf(current_openai_base_url, sizeof(current_openai_base_url), "%s", value);
+            else if (strcmp(key, "anthropic_api_key") == 0) snprintf(current_anthropic_api_key, sizeof(current_anthropic_api_key), "%s", value);
+            else if (strcmp(key, "anthropic_model") == 0) snprintf(current_anthropic_model, sizeof(current_anthropic_model), "%s", value);
             else if (strcmp(key, "max_history") == 0) current_max_history_messages = atoi(value);
-            else if (strcmp(key, "system_prompt") == 0) strncpy(current_system_prompt, value, sizeof(current_system_prompt)-1);
+            else if (strcmp(key, "system_prompt") == 0) snprintf(current_system_prompt, sizeof(current_system_prompt), "%s", value);
             else if (strcmp(key, "history_limits_disabled") == 0) history_limits_disabled = (strcmp(value, "true") == 0);
             else if (strcmp(key, "enter_sends_message") == 0) enter_key_sends_message = (strcmp(value, "true") == 0);
 
@@ -800,10 +847,17 @@ void save_settings() {
     if (ensure_config_dir_exists() != 0) { fprintf(stderr, "Config dir error. Settings not saved.\n"); return; }
     char *settings_file = get_config_path(CONFIG_FILE_NAME);
     if (!settings_file) { fprintf(stderr, "Settings file path error. Not saved.\n"); return; }
-    FILE *fp = fopen(settings_file, "w");
-    if (!fp) {
-        char err_msg[PATH_MAX + 100]; snprintf(err_msg, sizeof(err_msg), "fopen for writing: %s", settings_file);
+    int fd = open(settings_file, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd == -1) {
+        char err_msg[PATH_MAX + 100]; snprintf(err_msg, sizeof(err_msg), "open for writing: %s", settings_file);
         perror(err_msg); return;
+    }
+    if (fchmod(fd, 0600) == -1) {
+        perror("fchmod settings file"); close(fd); return;
+    }
+    FILE *fp = fdopen(fd, "w");
+    if (!fp) {
+        perror("fdopen settings file"); close(fd); return;
     }
     const char* provider_str = "gemini";
     if (current_api_provider == DP_PROVIDER_OPENAI_COMPATIBLE) provider_str = "openai";
@@ -826,14 +880,33 @@ void save_settings() {
     fclose(fp); printf("Settings saved to %s\n", settings_file);
 }
 
+static int ends_with_ignore_case(const char *str, const char *suffix) {
+    if (!str || !suffix) return 0;
+    size_t str_len = strlen(str);
+    size_t suffix_len = strlen(suffix);
+    if (suffix_len > str_len) return 0;
+
+    const char *p_str = str + str_len - suffix_len;
+    const char *p_suffix = suffix;
+
+    while (*p_suffix) {
+        if (tolower((unsigned char)*p_str) != tolower((unsigned char)*p_suffix)) {
+            return 0;
+        }
+        p_str++;
+        p_suffix++;
+    }
+    return 1;
+}
+
 void file_selection_ok_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     XmFileSelectionBoxCallbackStruct *cbs = (XmFileSelectionBoxCallbackStruct *)call_data;
     char *filename = NULL; XmStringGetLtoR(cbs->value, XmFONTLIST_DEFAULT_TAG, &filename);
     if (!filename || strlen(filename) == 0) { XtFree(filename); return; }
     strncpy(attached_image_path, filename, PATH_MAX -1); attached_image_path[PATH_MAX-1] = '\0';
-    if (strstr(filename, ".png") || strstr(filename, ".PNG")) strcpy(attached_image_mime_type, "image/png");
-    else if (strstr(filename, ".jpg") || strstr(filename, ".JPG") || strstr(filename, ".jpeg") || strstr(filename, ".JPEG")) strcpy(attached_image_mime_type, "image/jpeg");
-    else if (strstr(filename, ".gif") || strstr(filename, ".GIF")) strcpy(attached_image_mime_type, "image/gif");
+    if (ends_with_ignore_case(filename, ".png")) snprintf(attached_image_mime_type, sizeof(attached_image_mime_type), "image/png");
+    else if (ends_with_ignore_case(filename, ".jpg") || ends_with_ignore_case(filename, ".jpeg")) snprintf(attached_image_mime_type, sizeof(attached_image_mime_type), "image/jpeg");
+    else if (ends_with_ignore_case(filename, ".gif")) snprintf(attached_image_mime_type, sizeof(attached_image_mime_type), "image/gif");
     else { show_error_dialog("Unsupported image type (PNG, JPG, GIF)."); XtFree(filename); attached_image_path[0] = '\0'; return; }
     size_t file_size; unsigned char *file_buffer = read_file_to_buffer(filename, &file_size); XtFree(filename);
     if (!file_buffer) { show_error_dialog("Could not read image file."); attached_image_path[0] = '\0'; return; }
@@ -929,41 +1002,6 @@ void save_chat_as_callback(Widget w, XtPointer client_data, XtPointer call_data)
     XtManageChild(file_selector);
 }
 
-char* base64_encode(const unsigned char *data, size_t input_length) {
-    const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    size_t output_length = 4 * ((input_length + 2) / 3);
-    char *encoded_data = malloc(output_length + 1);
-    if (!encoded_data) { perror("malloc base64"); return NULL; }
-    for (size_t i = 0, j = 0; i < input_length;) {
-        uint32_t octet_a = i < input_length ? data[i++] : 0;
-        uint32_t octet_b = i < input_length ? data[i++] : 0;
-        uint32_t octet_c = i < input_length ? data[i++] : 0;
-        uint32_t triple = (octet_a << 16) + (octet_b << 8) + octet_c;
-        encoded_data[j++] = base64_chars[(triple >> 18) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 12) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 6) & 0x3F];
-        encoded_data[j++] = base64_chars[(triple >> 0) & 0x3F];
-    }
-    for (size_t i = 0; i < (3 - input_length % 3) % 3; i++) encoded_data[output_length - 1 - i] = '=';
-    encoded_data[output_length] = '\0';
-    return encoded_data;
-}
-
-unsigned char* read_file_to_buffer(const char* filename, size_t* file_size) {
-    FILE* f = fopen(filename, "rb");
-    if (!f) { perror("fopen read_file"); return NULL; }
-    fseek(f, 0, SEEK_END); long size = ftell(f);
-    if (size < 0 || size > 20 * 1024 * 1024) {
-        fclose(f); fprintf(stderr, "File too large (max 20MB) or ftell error.\n"); return NULL;
-    }
-    *file_size = (size_t)size; fseek(f, 0, SEEK_SET);
-    unsigned char* buffer = malloc(*file_size);
-    if (!buffer) { fclose(f); perror("malloc read_file"); return NULL; }
-    if (fread(buffer, 1, *file_size, f) != *file_size) {
-        fclose(f); free(buffer); fprintf(stderr, "fread error.\n"); return NULL;
-    }
-    fclose(f); return buffer;
-}
 
 void initialize_dp_context() {
     if (dp_ctx) { dp_destroy_context(dp_ctx); dp_ctx = NULL; }
@@ -1081,6 +1119,16 @@ void settings_tab_change_callback(Widget w, XtPointer client_data, XtPointer cal
     if (settings_current_tab_content) XtManageChild(settings_current_tab_content);
 }
 
+static void update_settings_text_field(Widget tf, const char *value, const char *placeholder) {
+    if (strlen(value) == 0) {
+        XmTextFieldSetString(tf, (char*)placeholder);
+        XtVaSetValues(tf, XmNforeground, grey_fg_color, NULL);
+    } else {
+        XmTextFieldSetString(tf, (char*)value);
+        XtVaSetValues(tf, XmNforeground, normal_fg_color, NULL);
+    }
+}
+
 void populate_settings_dialog() {
     XmToggleButtonSetState(provider_gemini_rb, current_api_provider == DP_PROVIDER_GOOGLE_GEMINI, False);
     XmToggleButtonSetState(provider_openai_rb, current_api_provider == DP_PROVIDER_OPENAI_COMPATIBLE, False);
@@ -1099,62 +1147,34 @@ void populate_settings_dialog() {
     XtSetSensitive(history_length_text, !history_limits_disabled);
 
     // Gemini
-    if (strlen(current_gemini_api_key) == 0) {
-        XmTextFieldSetString(gemini_api_key_text, DEFAULT_GEMINI_KEY_PLACEHOLDER);
-        XtVaSetValues(gemini_api_key_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(gemini_api_key_text, current_gemini_api_key);
-        XtVaSetValues(gemini_api_key_text, XmNforeground, normal_fg_color, NULL);
-    }
-    if (strlen(current_gemini_model) == 0) {
-        XmTextFieldSetString(gemini_model_text, DEFAULT_GEMINI_MODEL);
-        XtVaSetValues(gemini_model_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(gemini_model_text, current_gemini_model);
-        XtVaSetValues(gemini_model_text, XmNforeground, normal_fg_color, NULL);
-    }
+    update_settings_text_field(gemini_api_key_text, current_gemini_api_key, DEFAULT_GEMINI_KEY_PLACEHOLDER);
+    update_settings_text_field(gemini_model_text, current_gemini_model, DEFAULT_GEMINI_MODEL);
     XmListDeleteAllItems(gemini_model_list);
 
     // OpenAI
-    if (strlen(current_openai_api_key) == 0) {
-        XmTextFieldSetString(openai_api_key_text, DEFAULT_OPENAI_KEY_PLACEHOLDER);
-        XtVaSetValues(openai_api_key_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(openai_api_key_text, current_openai_api_key);
-        XtVaSetValues(openai_api_key_text, XmNforeground, normal_fg_color, NULL);
-    }
-    if (strlen(current_openai_model) == 0) {
-        XmTextFieldSetString(openai_model_text, DEFAULT_OPENAI_MODEL);
-        XtVaSetValues(openai_model_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(openai_model_text, current_openai_model);
-        XtVaSetValues(openai_model_text, XmNforeground, normal_fg_color, NULL);
-    }
-    if (strlen(current_openai_base_url) == 0) {
-        XmTextFieldSetString(openai_base_url_text, DEFAULT_OPENAI_BASE_URL);
-        XtVaSetValues(openai_base_url_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(openai_base_url_text, current_openai_base_url);
-        XtVaSetValues(openai_base_url_text, XmNforeground, normal_fg_color, NULL);
-    }
+    update_settings_text_field(openai_api_key_text, current_openai_api_key, DEFAULT_OPENAI_KEY_PLACEHOLDER);
+    update_settings_text_field(openai_model_text, current_openai_model, DEFAULT_OPENAI_MODEL);
+    update_settings_text_field(openai_base_url_text, current_openai_base_url, DEFAULT_OPENAI_BASE_URL);
     XmListDeleteAllItems(openai_model_list);
 
     // Anthropic
-    if (strlen(current_anthropic_api_key) == 0) {
-        XmTextFieldSetString(anthropic_api_key_text, DEFAULT_ANTHROPIC_KEY_PLACEHOLDER);
-        XtVaSetValues(anthropic_api_key_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(anthropic_api_key_text, current_anthropic_api_key);
-        XtVaSetValues(anthropic_api_key_text, XmNforeground, normal_fg_color, NULL);
-    }
-    if (strlen(current_anthropic_model) == 0) {
-        XmTextFieldSetString(anthropic_model_text, DEFAULT_ANTHROPIC_MODEL);
-        XtVaSetValues(anthropic_model_text, XmNforeground, grey_fg_color, NULL);
-    } else {
-        XmTextFieldSetString(anthropic_model_text, current_anthropic_model);
-        XtVaSetValues(anthropic_model_text, XmNforeground, normal_fg_color, NULL);
-    }
+    update_settings_text_field(anthropic_api_key_text, current_anthropic_api_key, DEFAULT_ANTHROPIC_KEY_PLACEHOLDER);
+    update_settings_text_field(anthropic_model_text, current_anthropic_model, DEFAULT_ANTHROPIC_MODEL);
     XmListDeleteAllItems(anthropic_model_list);
+}
+
+static void retrieve_text_field_value(Widget w, char *buffer, size_t buffer_size, const char *placeholder, Boolean clear_if_placeholder) {
+    char *tmp = XmTextFieldGetString(w);
+    Pixel fg_color;
+    XtVaGetValues(w, XmNforeground, &fg_color, NULL);
+
+    if (clear_if_placeholder && placeholder && strcmp(tmp, placeholder) == 0 && fg_color == grey_fg_color) {
+        if (buffer_size > 0) buffer[0] = '\0';
+    } else {
+        strncpy(buffer, tmp, buffer_size - 1);
+        if (buffer_size > 0) buffer[buffer_size - 1] = '\0';
+    }
+    XtFree(tmp);
 }
 
 void retrieve_settings_from_dialog() {
@@ -1169,47 +1189,17 @@ void retrieve_settings_from_dialog() {
     history_limits_disabled = XmToggleButtonGetState(disable_history_limit_toggle);
     enter_key_sends_message = XmToggleButtonGetState(enter_sends_message_toggle);
 
-    char *tmp; Pixel fg_color;
+    retrieve_text_field_value(gemini_api_key_text, current_gemini_api_key, sizeof(current_gemini_api_key), DEFAULT_GEMINI_KEY_PLACEHOLDER, True);
+    retrieve_text_field_value(gemini_model_text, current_gemini_model, sizeof(current_gemini_model), DEFAULT_GEMINI_MODEL, False);
 
-    tmp = XmTextFieldGetString(gemini_api_key_text);
-    XtVaGetValues(gemini_api_key_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_GEMINI_KEY_PLACEHOLDER) == 0 && fg_color == grey_fg_color) current_gemini_api_key[0] = '\0';
-    else { strncpy(current_gemini_api_key, tmp, sizeof(current_gemini_api_key)-1); current_gemini_api_key[sizeof(current_gemini_api_key)-1]='\0'; }
-    XtFree(tmp);
-    tmp = XmTextFieldGetString(gemini_model_text);
-    XtVaGetValues(gemini_model_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_GEMINI_MODEL) == 0 && fg_color == grey_fg_color) strcpy(current_gemini_model, DEFAULT_GEMINI_MODEL);
-    else { strncpy(current_gemini_model, tmp, sizeof(current_gemini_model)-1); current_gemini_model[sizeof(current_gemini_model)-1]='\0';}
-    XtFree(tmp);
+    retrieve_text_field_value(openai_api_key_text, current_openai_api_key, sizeof(current_openai_api_key), DEFAULT_OPENAI_KEY_PLACEHOLDER, True);
+    retrieve_text_field_value(openai_model_text, current_openai_model, sizeof(current_openai_model), DEFAULT_OPENAI_MODEL, False);
+    retrieve_text_field_value(openai_base_url_text, current_openai_base_url, sizeof(current_openai_base_url), DEFAULT_OPENAI_BASE_URL, True);
 
-    tmp = XmTextFieldGetString(openai_api_key_text);
-    XtVaGetValues(openai_api_key_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_OPENAI_KEY_PLACEHOLDER) == 0 && fg_color == grey_fg_color) current_openai_api_key[0] = '\0';
-    else { strncpy(current_openai_api_key, tmp, sizeof(current_openai_api_key)-1); current_openai_api_key[sizeof(current_openai_api_key)-1]='\0'; }
-    XtFree(tmp);
-    tmp = XmTextFieldGetString(openai_model_text);
-    XtVaGetValues(openai_model_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_OPENAI_MODEL) == 0 && fg_color == grey_fg_color) strcpy(current_openai_model, DEFAULT_OPENAI_MODEL);
-    else { strncpy(current_openai_model, tmp, sizeof(current_openai_model)-1); current_openai_model[sizeof(current_openai_model)-1]='\0';}
-    XtFree(tmp);
-    tmp = XmTextFieldGetString(openai_base_url_text);
-    XtVaGetValues(openai_base_url_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_OPENAI_BASE_URL) == 0 && fg_color == grey_fg_color) current_openai_base_url[0] = '\0';
-    else { strncpy(current_openai_base_url, tmp, sizeof(current_openai_base_url)-1); current_openai_base_url[sizeof(current_openai_base_url)-1]='\0'; }
-    XtFree(tmp);
+    retrieve_text_field_value(anthropic_api_key_text, current_anthropic_api_key, sizeof(current_anthropic_api_key), DEFAULT_ANTHROPIC_KEY_PLACEHOLDER, True);
+    retrieve_text_field_value(anthropic_model_text, current_anthropic_model, sizeof(current_anthropic_model), DEFAULT_ANTHROPIC_MODEL, False);
 
-    tmp = XmTextFieldGetString(anthropic_api_key_text);
-    XtVaGetValues(anthropic_api_key_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_ANTHROPIC_KEY_PLACEHOLDER) == 0 && fg_color == grey_fg_color) current_anthropic_api_key[0] = '\0';
-    else { strncpy(current_anthropic_api_key, tmp, sizeof(current_anthropic_api_key)-1); current_anthropic_api_key[sizeof(current_anthropic_api_key)-1]='\0'; }
-    XtFree(tmp);
-    tmp = XmTextFieldGetString(anthropic_model_text);
-    XtVaGetValues(anthropic_model_text, XmNforeground, &fg_color, NULL);
-    if (strcmp(tmp, DEFAULT_ANTHROPIC_MODEL) == 0 && fg_color == grey_fg_color) strcpy(current_anthropic_model, DEFAULT_ANTHROPIC_MODEL);
-    else { strncpy(current_anthropic_model, tmp, sizeof(current_anthropic_model)-1); current_anthropic_model[sizeof(current_anthropic_model)-1]='\0';}
-    XtFree(tmp);
-
-    tmp = XmTextGetString(system_prompt_text);
+    char *tmp = XmTextGetString(system_prompt_text);
     strncpy(current_system_prompt, tmp, sizeof(current_system_prompt)-1); current_system_prompt[sizeof(current_system_prompt)-1]='\0';
     XtFree(tmp);
     append_default_system_prompt = XmToggleButtonGetState(append_prompt_toggle);
@@ -1342,23 +1332,65 @@ static void numeric_verify_cb(Widget w, XtPointer client_data, XtPointer call_da
 }
 
 void render_all_history() {
-    XmTextSetString(conversation_text, ""); // Clear view
+    // 1. Calculate required buffer size
+    size_t total_len = 0;
     for (int i = 0; i < chat_history_count; i++) {
         const char* nick = (chat_history[i].role == DP_ROLE_USER) ? USER_NICKNAME : ASSISTANT_NICKNAME;
-        char line_buffer[8192];
-        snprintf(line_buffer, sizeof(line_buffer), "%s: ", nick);
+        total_len += strlen(nick) + 2; // "Nick: "
 
         for (size_t j = 0; j < chat_history[i].num_parts; j++) {
             dp_content_part_t* part = &chat_history[i].parts[j];
             if (part->type == DP_CONTENT_PART_TEXT) {
-                strncat(line_buffer, part->text, sizeof(line_buffer) - strlen(line_buffer) - 1);
+                if (part->text) total_len += strlen(part->text);
             } else if (part->type == DP_CONTENT_PART_IMAGE_BASE64) {
-                strncat(line_buffer, " [Image Attached]", sizeof(line_buffer) - strlen(line_buffer) - 1);
+                total_len += strlen(" [Image Attached]");
             }
         }
-        strncat(line_buffer, "\n", sizeof(line_buffer) - strlen(line_buffer) - 1);
-        append_to_conversation(line_buffer);
+        total_len += 1; // "\n"
     }
+
+    // 2. Allocate buffer
+    char* full_history = malloc(total_len + 1);
+    if (!full_history) {
+        perror("malloc render_all_history");
+        return;
+    }
+
+    // 3. Construct string
+    char* current_pos = full_history;
+    for (int i = 0; i < chat_history_count; i++) {
+        const char* nick = (chat_history[i].role == DP_ROLE_USER) ? USER_NICKNAME : ASSISTANT_NICKNAME;
+
+        size_t nick_len = strlen(nick);
+        memcpy(current_pos, nick, nick_len);
+        current_pos += nick_len;
+        memcpy(current_pos, ": ", 2);
+        current_pos += 2;
+
+        for (size_t j = 0; j < chat_history[i].num_parts; j++) {
+            dp_content_part_t* part = &chat_history[i].parts[j];
+            if (part->type == DP_CONTENT_PART_TEXT && part->text) {
+                size_t text_len = strlen(part->text);
+                memcpy(current_pos, part->text, text_len);
+                current_pos += text_len;
+            } else if (part->type == DP_CONTENT_PART_IMAGE_BASE64) {
+                 const char* img_msg = " [Image Attached]";
+                 size_t img_len = strlen(img_msg);
+                 memcpy(current_pos, img_msg, img_len);
+                 current_pos += img_len;
+            }
+        }
+        *current_pos = '\n';
+        current_pos++;
+    }
+    *current_pos = '\0';
+
+    // 4. Update UI once
+    XmTextSetString(conversation_text, full_history);
+    XmTextShowPosition(conversation_text, XmTextGetLastPosition(conversation_text));
+
+    // 5. Cleanup
+    free(full_history);
 }
 
 
@@ -1466,8 +1498,8 @@ void create_anthropic_tab(Widget parent) {
 void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     if (settings_shell == NULL) {
         settings_shell = XtVaCreatePopupShell("settingsShell", topLevelShellWidgetClass, app_shell, XmNtitle, "MotifGPT Settings", XmNwidth, 550, XmNheight, 600, NULL);
-        Widget dialog_form = XtVaCreateManagedWidget("dialogForm", xmFormWidgetClass, settings_shell, XmNverticalSpacing, 5, XmNhorizontalSpacing, 5, NULL);
-        Widget tab_button_rc = XtVaCreateManagedWidget("tabButtonRc", xmRowColumnWidgetClass, dialog_form, XmNorientation, XmHORIZONTAL, XmNradioBehavior, True, XmNindicatorType, XmONE_OF_MANY, XmNentryAlignment, XmALIGNMENT_CENTER, XmNpacking, XmPACK_TIGHT, XmNspacing, 0, XmNtopAttachment, XmATTACH_FORM, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, 5, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5, XmNshadowThickness, 0, NULL);
+        Widget dialog_form = XtVaCreateManagedWidget("dialogForm", xmFormWidgetClass, settings_shell, XmNverticalSpacing, UI_SPACING_MEDIUM, XmNhorizontalSpacing, UI_SPACING_MEDIUM, NULL);
+        Widget tab_button_rc = XtVaCreateManagedWidget("tabButtonRc", xmRowColumnWidgetClass, dialog_form, XmNorientation, XmHORIZONTAL, XmNradioBehavior, True, XmNindicatorType, XmONE_OF_MANY, XmNentryAlignment, XmALIGNMENT_CENTER, XmNpacking, XmPACK_TIGHT, XmNspacing, 0, XmNtopAttachment, XmATTACH_FORM, XmNtopOffset, UI_SPACING_MEDIUM, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, UI_SPACING_MEDIUM, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, UI_SPACING_MEDIUM, XmNshadowThickness, 0, NULL);
         Widget general_tab_btn = XtVaCreateManagedWidget("General", xmToggleButtonWidgetClass, tab_button_rc, XmNindicatorOn, False, XmNshadowThickness, 2, NULL);
         Widget gemini_tab_btn = XtVaCreateManagedWidget("Gemini", xmToggleButtonWidgetClass, tab_button_rc, XmNindicatorOn, False, XmNshadowThickness, 2, NULL);
         Widget openai_tab_btn = XtVaCreateManagedWidget("OpenAI", xmToggleButtonWidgetClass, tab_button_rc, XmNindicatorOn, False, XmNshadowThickness, 2, NULL);
@@ -1476,7 +1508,7 @@ void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
         XtAddCallback(gemini_tab_btn, XmNvalueChangedCallback, settings_tab_change_callback, (XtPointer)1);
         XtAddCallback(openai_tab_btn, XmNvalueChangedCallback, settings_tab_change_callback, (XtPointer)2);
         XtAddCallback(anthropic_tab_btn, XmNvalueChangedCallback, settings_tab_change_callback, (XtPointer)3);
-        Widget content_frame = XtVaCreateManagedWidget("contentFrame", xmFrameWidgetClass, dialog_form, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, tab_button_rc, XmNtopOffset, 5, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, 5, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 45, XmNshadowType, XmSHADOW_ETCHED_IN, NULL);
+        Widget content_frame = XtVaCreateManagedWidget("contentFrame", xmFrameWidgetClass, dialog_form, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, tab_button_rc, XmNtopOffset, UI_SPACING_MEDIUM, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, UI_SPACING_MEDIUM, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, UI_SPACING_MEDIUM, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 45, XmNshadowType, XmSHADOW_ETCHED_IN, NULL);
 
         create_general_tab(content_frame);
         create_gemini_tab(content_frame);
@@ -1485,9 +1517,9 @@ void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
 
         Widget button_rc_bottom = XtVaCreateManagedWidget("buttonRcBottom", xmRowColumnWidgetClass, dialog_form,
                                                    XmNorientation, XmHORIZONTAL, XmNpacking, XmPACK_TIGHT,
-                                                   XmNentryAlignment, XmALIGNMENT_CENTER, XmNspacing, 10,
-                                                   XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 5,
-                                                   XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5,
+                                                   XmNentryAlignment, XmALIGNMENT_CENTER, XmNspacing, UI_SPACING_LARGE,
+                                                   XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, UI_SPACING_MEDIUM,
+                                                   XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, UI_SPACING_MEDIUM,
                                                    NULL);
         Widget ok_button = XtVaCreateManagedWidget("OK", xmPushButtonWidgetClass, button_rc_bottom, NULL);
         Widget cancel_button = XtVaCreateManagedWidget("Cancel", xmPushButtonWidgetClass, button_rc_bottom, NULL);
