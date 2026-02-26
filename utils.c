@@ -3,30 +3,49 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <time.h>
+
+void generate_system_prompt(char *buffer, size_t buffer_size, const char *custom_prompt, bool append_default) {
+    char default_prompt[512];
+    time_t now = time(0);
+    struct tm* ltm = localtime(&now);
+    char dateStr[80];
+    strftime(dateStr, sizeof(dateStr), "%A, %B %d, %Y", ltm);
+    snprintf(default_prompt, sizeof(default_prompt),
+             "- You are MotifGPT, an assistant whose client program runs on UNIX with the Motif toolkit.\n"
+             "- The current date is %s.\n"
+             "- The user's environment does not format Markdown. Do not produce any Markdown unless the user explicitly requests it.",
+             dateStr);
+
+    if (custom_prompt == NULL || strlen(custom_prompt) == 0) {
+        strncpy(buffer, default_prompt, buffer_size - 1);
+        buffer[buffer_size - 1] = '\0';
+    } else {
+        if (append_default) {
+            snprintf(buffer, buffer_size,
+                     "%s\n\n%s", default_prompt, custom_prompt);
+        } else {
+            strncpy(buffer, custom_prompt, buffer_size - 1);
+            buffer[buffer_size - 1] = '\0';
+        }
+    }
+}
 
 unsigned char* read_file_to_buffer(const char* filename, size_t* file_size) {
     FILE* f = fopen(filename, "rb");
     if (!f) { perror("fopen read_file"); return NULL; }
     fseek(f, 0, SEEK_END); long size = ftell(f);
-    if (size < 0 || size > 20 * 1024 * 1024) {
-        fclose(f); fprintf(stderr, "File too large (max 20MB) or ftell error.\n"); return NULL;
+    if (size < 0 || size > MAX_FILE_SIZE_BYTES) {
+        fclose(f); fprintf(stderr, "File too large (max %dMB) or ftell error.\n", (int)(MAX_FILE_SIZE_BYTES / (1024 * 1024))); return NULL;
     }
     *file_size = (size_t)size; fseek(f, 0, SEEK_SET);
-
-    // Ensure we don't malloc(0) which is implementation defined
-    size_t alloc_size = (*file_size == 0) ? 1 : *file_size;
-    unsigned char* buffer = malloc(alloc_size);
+    unsigned char* buffer = malloc(*file_size ? *file_size : 1);
     if (!buffer) { fclose(f); perror("malloc read_file"); return NULL; }
-
     if (*file_size > 0) {
         if (fread(buffer, 1, *file_size, f) != *file_size) {
             fclose(f); free(buffer); fprintf(stderr, "fread error.\n"); return NULL;
         }
-    } else {
-        // For empty files, initialize the buffer to be safe, though size is 0
-        buffer[0] = '\0';
     }
-
     fclose(f); return buffer;
 }
 
