@@ -153,6 +153,8 @@ void save_chat_as_callback(Widget, XtPointer, XtPointer);
 void file_selection_open_ok_callback(Widget, XtPointer, XtPointer);
 void file_selection_save_as_ok_callback(Widget, XtPointer, XtPointer);
 void render_all_history();
+void append_to_conversation(const char* text);
+void append_to_conversation_ex(const char* text, Boolean scroll);
 unsigned char* read_file_to_buffer(const char*, size_t*);
 char* base64_encode(const unsigned char*, size_t);
 static void popup_handler(Widget, XtPointer, XEvent*, Boolean*);
@@ -171,11 +173,17 @@ static void openai_base_url_focus_in_cb(Widget, XtPointer, XtPointer);
 static void openai_base_url_focus_out_cb(Widget, XtPointer, XtPointer);
 
 
-void append_to_conversation(const char* text) {
+void append_to_conversation_ex(const char* text, Boolean scroll) {
     if (!conversation_text || !XtIsManaged(conversation_text)) return;
     XmTextPosition pos = XmTextGetLastPosition(conversation_text);
     XmTextInsert(conversation_text, pos, (char*)text);
-    XmTextShowPosition(conversation_text, XmTextGetLastPosition(conversation_text));
+    if (scroll) {
+        XmTextShowPosition(conversation_text, XmTextGetLastPosition(conversation_text));
+    }
+}
+
+void append_to_conversation(const char* text) {
+    append_to_conversation_ex(text, True);
 }
 
 void append_to_assistant_buffer(const char* text) {
@@ -1354,7 +1362,10 @@ void render_all_history() {
             }
         }
         strncat(line_buffer, "\n", sizeof(line_buffer) - strlen(line_buffer) - 1);
-        append_to_conversation(line_buffer);
+        append_to_conversation_ex(line_buffer, False);
+    }
+    if (conversation_text && XtIsManaged(conversation_text)) {
+        XmTextShowPosition(conversation_text, XmTextGetLastPosition(conversation_text));
     }
 }
 
