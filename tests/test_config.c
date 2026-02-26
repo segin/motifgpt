@@ -4,7 +4,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include "../config_utils.h"
+#include "../motifgpt_config.h"
 
 int main() {
     // Setup temp dir
