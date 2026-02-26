@@ -3,18 +3,29 @@
 
 #include <stddef.h>
 
-typedef struct {
-    char *data;
-    size_t len;
-    size_t capacity;
-} assistant_response_buffer_t;
+extern char *current_assistant_response_buffer;
+extern size_t current_assistant_response_len;
+extern size_t current_assistant_response_capacity;
 
-void init_assistant_buffer(assistant_response_buffer_t *buf, size_t initial_capacity);
-void free_assistant_buffer(assistant_response_buffer_t *buf);
-void append_to_assistant_buffer(assistant_response_buffer_t *buf, const char *text);
-void clear_assistant_buffer(assistant_response_buffer_t *buf);
+/**
+ * Initializes the assistant response buffer.
+ */
+void init_assistant_buffer();
 
-char* base64_encode(const unsigned char *data, size_t input_length);
-unsigned char* read_file_to_buffer(const char* filename, size_t* file_size);
+/**
+ * Frees the assistant response buffer.
+ */
+void free_assistant_buffer();
 
-#endif // BUFFER_UTILS_H
+/**
+ * Resets the assistant response buffer without freeing it.
+ */
+void reset_assistant_buffer();
+
+/**
+ * Appends text to the assistant response buffer, with overflow protection.
+ * @param text The text to append.
+ */
+void append_to_assistant_buffer(const char* text);
+
+#endif /* BUFFER_UTILS_H */
