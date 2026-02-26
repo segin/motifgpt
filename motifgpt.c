@@ -288,58 +288,115 @@ int stream_handler(const char* token, void* user_data, bool is_final, const char
 
 void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
     pipe_message_t msg;
-    ssize_t nbytes = read(pipe_fds[0], &msg, sizeof(pipe_message_t));
-    if (nbytes == sizeof(pipe_message_t)) {
-        switch (msg.type) {
-            case PIPE_MSG_TOKEN:
-                if (assistant_is_replying && !prefix_already_added_for_current_reply) {
-                    append_to_conversation(current_assistant_prefix);
-                    prefix_already_added_for_current_reply = true;
-                }
-                append_to_conversation(msg.data);
-                break;
-            case PIPE_MSG_STREAM_END:
-                if (assistant_is_replying && !prefix_already_added_for_current_reply && current_assistant_response_len == 0) {
-                    append_to_conversation(current_assistant_prefix);
-                }
-                append_to_conversation("\n");
-                if (current_assistant_response_buffer && current_assistant_response_len > 0) {
-                    add_message_to_history(DP_ROLE_ASSISTANT, current_assistant_response_buffer, NULL, NULL);
-                } else if (assistant_is_replying && current_assistant_response_len == 0) {
-                    add_message_to_history(DP_ROLE_ASSISTANT, "", NULL, NULL);
-                }
-                if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
-                current_assistant_response_len = 0;
-                assistant_is_replying = false; prefix_already_added_for_current_reply = false;
-                break;
-            case PIPE_MSG_ERROR:
-                show_error_dialog(msg.data); append_to_conversation(msg.data); append_to_conversation("\n");
-                assistant_is_replying = false; prefix_already_added_for_current_reply = false;
-                break;
-            case PIPE_MSG_MODEL_LIST_ITEM:
-                if (settings_shell && XtIsManaged(settings_shell)) {
-                    Widget list_to_update = NULL;
-                    if (settings_current_tab_content == settings_gemini_tab_content) list_to_update = gemini_model_list;
-                    else if (settings_current_tab_content == settings_openai_tab_content) list_to_update = openai_model_list;
-                    else if (settings_current_tab_content == settings_anthropic_tab_content) list_to_update = anthropic_model_list;
+    char batch_buffer[8192];
+    size_t batch_len = 0;
+    const size_t BATCH_CAPACITY = sizeof(batch_buffer) - 1; // Leave room for null terminator
 
-                    if (list_to_update) {
-                        XmString item = XmStringCreateLocalized(msg.data);
-                        XmListAddItemUnselected(list_to_update, item, 0); XmStringFree(item);
-                    }
-                }
+    batch_buffer[0] = '\0';
+
+    // Safety break to prevent infinite loop if pipe is flooded faster than we can read
+    int max_reads = 1000;
+
+    while (max_reads-- > 0) {
+        ssize_t nbytes = read(pipe_fds[0], &msg, sizeof(pipe_message_t));
+
+        if (nbytes == sizeof(pipe_message_t)) {
+             if (msg.type == PIPE_MSG_TOKEN) {
+                 if (assistant_is_replying && !prefix_already_added_for_current_reply) {
+                     size_t prefix_len = strlen(current_assistant_prefix);
+                     if (batch_len + prefix_len > BATCH_CAPACITY) {
+                         if (batch_len > 0) {
+                             append_to_conversation(batch_buffer);
+                             batch_buffer[0] = '\0';
+                             batch_len = 0;
+                         }
+                     }
+                     if (batch_len + prefix_len <= BATCH_CAPACITY) {
+                         strcpy(batch_buffer + batch_len, current_assistant_prefix);
+                         batch_len += prefix_len;
+                     } else {
+                         append_to_conversation(current_assistant_prefix);
+                     }
+                     prefix_already_added_for_current_reply = true;
+                 }
+
+                 size_t token_len = strlen(msg.data);
+                 if (batch_len + token_len > BATCH_CAPACITY) {
+                     append_to_conversation(batch_buffer);
+                     batch_buffer[0] = '\0';
+                     batch_len = 0;
+                 }
+
+                 if (token_len > BATCH_CAPACITY) {
+                     append_to_conversation(msg.data);
+                 } else {
+                     strcpy(batch_buffer + batch_len, msg.data);
+                     batch_len += token_len;
+                 }
+             } else {
+                 if (batch_len > 0) {
+                     append_to_conversation(batch_buffer);
+                     batch_buffer[0] = '\0';
+                     batch_len = 0;
+                 }
+
+                 switch (msg.type) {
+                     case PIPE_MSG_STREAM_END:
+                        if (assistant_is_replying && !prefix_already_added_for_current_reply && current_assistant_response_len == 0) {
+                            append_to_conversation(current_assistant_prefix);
+                        }
+                        append_to_conversation("\n");
+                        if (current_assistant_response_buffer && current_assistant_response_len > 0) {
+                            add_message_to_history(DP_ROLE_ASSISTANT, current_assistant_response_buffer, NULL, NULL);
+                        } else if (assistant_is_replying && current_assistant_response_len == 0) {
+                            add_message_to_history(DP_ROLE_ASSISTANT, "", NULL, NULL);
+                        }
+                        if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
+                        current_assistant_response_len = 0;
+                        assistant_is_replying = false; prefix_already_added_for_current_reply = false;
+                        break;
+                     case PIPE_MSG_ERROR:
+                        show_error_dialog(msg.data); append_to_conversation(msg.data); append_to_conversation("\n");
+                        assistant_is_replying = false; prefix_already_added_for_current_reply = false;
+                        break;
+                     case PIPE_MSG_MODEL_LIST_ITEM:
+                        if (settings_shell && XtIsManaged(settings_shell)) {
+                            Widget list_to_update = NULL;
+                            if (settings_current_tab_content == settings_gemini_tab_content) list_to_update = gemini_model_list;
+                            else if (settings_current_tab_content == settings_openai_tab_content) list_to_update = openai_model_list;
+                            else if (settings_current_tab_content == settings_anthropic_tab_content) list_to_update = anthropic_model_list;
+
+                            if (list_to_update) {
+                                XmString item = XmStringCreateLocalized(msg.data);
+                                XmListAddItemUnselected(list_to_update, item, 0); XmStringFree(item);
+                            }
+                        }
+                        break;
+                     case PIPE_MSG_MODEL_LIST_END: printf("Model listing complete.\n"); break;
+                     case PIPE_MSG_MODEL_LIST_ERROR: show_error_dialog(msg.data); break;
+                     default: break;
+                 }
+             }
+        } else if (nbytes == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 break;
-            case PIPE_MSG_MODEL_LIST_END: printf("Model listing complete.\n"); break;
-            case PIPE_MSG_MODEL_LIST_ERROR: show_error_dialog(msg.data); break;
+            } else {
+                perror("handle_pipe_input: read");
+                 XtRemoveInput(*id);
+                 break;
+            }
+        } else if (nbytes == 0) {
+             fprintf(stderr, "handle_pipe_input: EOF on pipe.\n");
+             XtRemoveInput(*id);
+             break;
+        } else {
+             fprintf(stderr, "handle_pipe_input: Partial read from pipe (%ld bytes).\n", nbytes);
+             break;
         }
-    } else if (nbytes == 0) {
-        fprintf(stderr, "handle_pipe_input: EOF on pipe.\n"); XtRemoveInput(*id);
-    } else if (nbytes != -1) {
-        fprintf(stderr, "handle_pipe_input: Partial read from pipe (%ld bytes).\n", nbytes);
-    } else {
-        if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            perror("handle_pipe_input: read from pipe"); XtRemoveInput(*id);
-        }
+    }
+
+    if (batch_len > 0) {
+        append_to_conversation(batch_buffer);
     }
 }
 
