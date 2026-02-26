@@ -18,10 +18,7 @@ Makefile
 Makefile.in
 stamp-h1
 m4/
-!m4/ax_pthread.m4
-missing
 
 # Object files and executables
 *.o
 motifgpt
-test_history
