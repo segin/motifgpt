@@ -1312,15 +1312,37 @@ void render_all_history() {
         char line_buffer[8192];
         snprintf(line_buffer, sizeof(line_buffer), "%s: ", nick);
 
+        size_t current_len = strlen(line_buffer);
+        size_t buffer_size = sizeof(line_buffer);
+
         for (size_t j = 0; j < chat_history[i].num_parts; j++) {
             dp_content_part_t* part = &chat_history[i].parts[j];
+            const char* text_to_append = NULL;
+
             if (part->type == DP_CONTENT_PART_TEXT) {
-                strncat(line_buffer, part->text, sizeof(line_buffer) - strlen(line_buffer) - 1);
+                text_to_append = part->text;
             } else if (part->type == DP_CONTENT_PART_IMAGE_BASE64) {
-                strncat(line_buffer, " [Image Attached]", sizeof(line_buffer) - strlen(line_buffer) - 1);
+                text_to_append = " [Image Attached]";
+            }
+
+            if (text_to_append) {
+                size_t remaining = buffer_size - current_len;
+                if (remaining > 1) {
+                    int ret = snprintf(line_buffer + current_len, remaining, "%s", text_to_append);
+                    if (ret > 0) {
+                        if ((size_t)ret >= remaining) {
+                             current_len = buffer_size - 1;
+                        } else {
+                             current_len += ret;
+                        }
+                    }
+                }
             }
         }
-        strncat(line_buffer, "\n", sizeof(line_buffer) - strlen(line_buffer) - 1);
+        if (current_len < buffer_size - 1) {
+            line_buffer[current_len++] = '\n';
+            line_buffer[current_len] = '\0';
+        }
         append_to_conversation_ex(line_buffer, False);
     }
     if (conversation_text && XtIsManaged(conversation_text)) {
