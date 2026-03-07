@@ -1,5 +1,0 @@
-Running suite(s): Settings
-Settings loaded from /tmp/motifgpt_test_CAJkFe/motifgpt/settings.conf
-No settings file (/tmp/motifgpt_test_2f9JA2/motifgpt/settings.conf). Using defaults/environment variables.
-100%: Checks: 2, Failures: 0, Errors: 0
-PASS test_settings (exit status: 0)
