@@ -27,7 +27,7 @@ PKG_CHECK_MODULES([LIBCJSON], [libcjson],
   [PKG_CHECK_MODULES([LIBCJSON], [cjson],
      ,
      [AC_MSG_ERROR([cJSON not found. Try installing libcjson-dev or cjson-devel.])])])
-PKG_CHECK_MODULES([DISASTERPARTY], [libdisasterparty],, [AC_MSG_ERROR([libdisasterparty not found. Make sure disasterparty.pc is in your PKG_CONFIG_PATH.])])
+PKG_CHECK_MODULES([DISASTERPARTY], [disasterparty],, [AC_MSG_ERROR([disasterparty not found. Make sure disasterparty.pc is in your PKG_CONFIG_PATH.])])
 
 # Combine all flags and libs for Makefile.am
 MOTIFGPT_CPPFLAGS="$PTHREAD_CFLAGS $X_CFLAGS $LIBCURL_CFLAGS $LIBCJSON_CFLAGS $DISASTERPARTY_CFLAGS"

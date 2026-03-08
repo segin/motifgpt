@@ -135,6 +135,8 @@ char current_openai_model[MODEL_ID_BUF_SIZE] = DEFAULT_OPENAI_MODEL;
 char current_openai_base_url[API_URL_BUF_SIZE] = "";
 char current_anthropic_api_key[API_KEY_BUF_SIZE] = "";
 char current_anthropic_model[MODEL_ID_BUF_SIZE] = DEFAULT_ANTHROPIC_MODEL;
+int current_max_history_messages = DEFAULT_MAX_HISTORY_MESSAGES;
+bool history_limits_disabled = false;
 Boolean enter_key_sends_message = True;
 char current_system_prompt[SYSTEM_PROMPT_BUF_SIZE] = "";
 Boolean append_default_system_prompt = True;
@@ -144,15 +146,11 @@ char attached_image_mime_type[64] = "";
 char *attached_image_base64_data = NULL;
 
 dp_context_t *dp_ctx = NULL;
+pthread_mutex_t dp_mutex = PTHREAD_MUTEX_INITIALIZER;
 char current_assistant_prefix[64];
 
 Pixel normal_fg_color, grey_fg_color;
 
-typedef enum {
-    PIPE_MSG_TOKEN, PIPE_MSG_STREAM_END, PIPE_MSG_ERROR,
-    PIPE_MSG_MODEL_LIST_ITEM, PIPE_MSG_MODEL_LIST_END, PIPE_MSG_MODEL_LIST_ERROR
-} pipe_message_type_t;
-typedef struct { pipe_message_type_t type; char data[512]; } pipe_message_t;
 typedef struct { dp_request_config_t config; char system_prompt_buffer[THREAD_SYSTEM_PROMPT_BUF_SIZE]; char temp_history_filename[PATH_MAX]; } llm_thread_data_t;
 typedef struct { dp_provider_type_t provider; char api_key_for_list[API_KEY_BUF_SIZE]; char base_url_for_list[API_URL_BUF_SIZE]; } get_models_thread_data_t;
 
@@ -957,7 +955,7 @@ void save_chat_as_callback(Widget w, XtPointer client_data, XtPointer call_data)
 }
 
 
-void initialize_dp_context() {
+void initialize_dp_context_unsafe() {
     if (dp_ctx) { dp_destroy_context(dp_ctx); dp_ctx = NULL; }
     const char* key_to_use = NULL;
     const char* model_to_use = NULL;
@@ -1052,9 +1050,14 @@ void initialize_dp_context() {
                (current_api_provider == DP_PROVIDER_GOOGLE_GEMINI ? "Gemini" : "OpenAI"),
                model_to_use,
                base_url_to_use ? base_url_to_use : "(default by disasterparty)");
-    }
-}
+               }
+               }
 
+               void initialize_dp_context() {
+               pthread_mutex_lock(&dp_mutex);
+               initialize_dp_context_unsafe();
+               pthread_mutex_unlock(&dp_mutex);
+               }
 void settings_disable_history_limit_toggle_cb(Widget w, XtPointer client_data, XtPointer call_data) {
     Boolean set = XmToggleButtonGetState(w);
     XtSetSensitive(history_length_text, !set);
