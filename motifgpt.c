@@ -1215,7 +1215,7 @@ void *perform_get_models_thread(void *arg) {
         if (model_list_struct && model_list_struct->error_message) {
              snprintf(err_buf, sizeof(err_buf), "Error Get Models (HTTP %ld): %s", model_list_struct->http_status_code, model_list_struct->error_message);
         } else if (model_list_struct) { snprintf(err_buf, sizeof(err_buf), "Error Get Models (HTTP %ld): Unknown API error.", model_list_struct->http_status_code);
-        } else { strcpy(err_buf, "Error Get Models: dp_list_models failed critically."); }
+        } else { snprintf(err_buf, sizeof(err_buf), "%s", "Error Get Models: dp_list_models failed critically."); }
         write_pipe_message(PIPE_MSG_MODEL_LIST_ERROR, err_buf);
     }
     write_pipe_message(PIPE_MSG_MODEL_LIST_END, NULL);
