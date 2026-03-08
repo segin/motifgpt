@@ -22,7 +22,9 @@ m4/
 # Object files and executables
 *.o
 *.a
+plugins/*.so
 motifgpt
+
 test_buffer_utils
 test_config
 test_history
