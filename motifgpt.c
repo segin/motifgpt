@@ -204,8 +204,6 @@ Widget create_provider_settings_tab(Widget parent, const char *prefix,
                                     int tab_index);
 void create_general_tab(Widget parent);
 void settings_disable_history_limit_toggle_cb(Widget, XtPointer, XtPointer);
-static void openai_base_url_focus_in_cb(Widget, XtPointer, XtPointer);
-static void openai_base_url_focus_out_cb(Widget, XtPointer, XtPointer);
 void setup_ui(void);
 
 
@@ -635,12 +633,6 @@ static void settings_text_field_focus_out_cb(Widget w, XtPointer client_data, Xt
 }
 
 
-static void openai_base_url_focus_in_cb(Widget w, XtPointer client_data, XtPointer call_data) {
-    settings_text_field_focus_in_cb(w, (XtPointer)DEFAULT_OPENAI_BASE_URL, call_data);
-}
-static void openai_base_url_focus_out_cb(Widget w, XtPointer client_data, XtPointer call_data) {
-    settings_text_field_focus_out_cb(w, (XtPointer)DEFAULT_OPENAI_BASE_URL, call_data);
-}
 
 
 void cut_callback(Widget w, XtPointer client_data, XtPointer call_data) {
@@ -1215,7 +1207,7 @@ void *perform_get_models_thread(void *arg) {
         if (model_list_struct && model_list_struct->error_message) {
              snprintf(err_buf, sizeof(err_buf), "Error Get Models (HTTP %ld): %s", model_list_struct->http_status_code, model_list_struct->error_message);
         } else if (model_list_struct) { snprintf(err_buf, sizeof(err_buf), "Error Get Models (HTTP %ld): Unknown API error.", model_list_struct->http_status_code);
-        } else { strcpy(err_buf, "Error Get Models: dp_list_models failed critically."); }
+        } else { snprintf(err_buf, sizeof(err_buf), "%s", "Error Get Models: dp_list_models failed critically."); }
         write_pipe_message(PIPE_MSG_MODEL_LIST_ERROR, err_buf);
     }
     write_pipe_message(PIPE_MSG_MODEL_LIST_END, NULL);
@@ -1308,19 +1300,49 @@ static void numeric_verify_cb(Widget w, XtPointer client_data, XtPointer call_da
 }
 
 void render_all_history() {
-    // 1. Calculate required buffer size
+    if (!conversation_text) return;
+
+    static const size_t user_nick_len = sizeof(USER_NICKNAME) - 1;
+    static const size_t assistant_nick_len = sizeof(ASSISTANT_NICKNAME) - 1;
+    static const char img_msg[] = " [Image Attached]";
+    static const size_t img_msg_len = sizeof(img_msg) - 1;
+
+    // 1. Calculate required buffer size and store part lengths
     size_t total_len = 0;
+    size_t total_parts = 0;
     for (int i = 0; i < chat_history_count; i++) {
-        const char* nick = (chat_history[i].role == DP_ROLE_USER) ? USER_NICKNAME : ASSISTANT_NICKNAME;
-        total_len += strlen(nick) + 2; // "Nick: "
+        total_parts += chat_history[i].num_parts;
+    }
+
+    size_t *part_lengths = NULL;
+    if (total_parts > 0) {
+        part_lengths = malloc(total_parts * sizeof(size_t));
+        if (!part_lengths) {
+            perror("malloc part_lengths");
+            return;
+        }
+    }
+
+    size_t part_idx = 0;
+    for (int i = 0; i < chat_history_count; i++) {
+        size_t nick_len = (chat_history[i].role == DP_ROLE_USER) ? user_nick_len : assistant_nick_len;
+        total_len += nick_len + 2; // "Nick: "
 
         for (size_t j = 0; j < chat_history[i].num_parts; j++) {
             dp_content_part_t* part = &chat_history[i].parts[j];
             if (part->type == DP_CONTENT_PART_TEXT) {
-                if (part->text) total_len += strlen(part->text);
+                if (part->text) {
+                    size_t len = strlen(part->text);
+                    part_lengths[part_idx] = len;
+                    total_len += len;
+                } else {
+                    part_lengths[part_idx] = 0;
+                }
             } else if (part->type == DP_CONTENT_PART_IMAGE_BASE64) {
-                total_len += strlen(" [Image Attached]");
+                part_lengths[part_idx] = img_msg_len;
+                total_len += img_msg_len;
             }
+            part_idx++;
         }
         total_len += 1; // "\n"
     }
@@ -1329,15 +1351,17 @@ void render_all_history() {
     char* full_history = malloc(total_len + 1);
     if (!full_history) {
         perror("malloc render_all_history");
+        free(part_lengths);
         return;
     }
 
     // 3. Construct string
     char* current_pos = full_history;
+    part_idx = 0;
     for (int i = 0; i < chat_history_count; i++) {
         const char* nick = (chat_history[i].role == DP_ROLE_USER) ? USER_NICKNAME : ASSISTANT_NICKNAME;
+        size_t nick_len = (chat_history[i].role == DP_ROLE_USER) ? user_nick_len : assistant_nick_len;
 
-        size_t nick_len = strlen(nick);
         memcpy(current_pos, nick, nick_len);
         current_pos += nick_len;
         memcpy(current_pos, ": ", 2);
@@ -1345,16 +1369,15 @@ void render_all_history() {
 
         for (size_t j = 0; j < chat_history[i].num_parts; j++) {
             dp_content_part_t* part = &chat_history[i].parts[j];
+            size_t len = (part_lengths != NULL) ? part_lengths[part_idx] : 0;
             if (part->type == DP_CONTENT_PART_TEXT && part->text) {
-                size_t text_len = strlen(part->text);
-                memcpy(current_pos, part->text, text_len);
-                current_pos += text_len;
+                memcpy(current_pos, part->text, len);
+                current_pos += len;
             } else if (part->type == DP_CONTENT_PART_IMAGE_BASE64) {
-                 const char* img_msg = " [Image Attached]";
-                 size_t img_len = strlen(img_msg);
-                 memcpy(current_pos, img_msg, img_len);
-                 current_pos += img_len;
+                 memcpy(current_pos, img_msg, len);
+                 current_pos += len;
             }
+            part_idx++;
         }
         *current_pos = '\n';
         current_pos++;
@@ -1367,6 +1390,7 @@ void render_all_history() {
 
     // 5. Cleanup
     free(full_history);
+    free(part_lengths);
 }
 
 
