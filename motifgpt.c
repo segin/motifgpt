@@ -104,6 +104,113 @@
 
 // --- End Configuration ---
 
+#include <dlfcn.h>
+#include <dirent.h>
+#include <cjson/cJSON.h>
+#include "motifgpt_plugin.h"
+
+// Global registry for tools
+#define MAX_TOOLS 64
+motifgpt_tool_t* registry_tools[MAX_TOOLS];
+int num_registry_tools = 0;
+
+void load_plugins(const char* plugin_dir) {
+    DIR *dir;
+    struct dirent *ent;
+    if ((dir = opendir(plugin_dir)) != NULL) {
+        while ((ent = readdir(dir)) != NULL) {
+            size_t len = strlen(ent->d_name);
+            if (len > 3 && strcmp(ent->d_name + len - 3, ".so") == 0) {
+                char path[PATH_MAX];
+                snprintf(path, sizeof(path), "%s/%s", plugin_dir, ent->d_name);
+                void* handle = dlopen(path, RTLD_LAZY);
+                if (handle) {
+                    motifgpt_plugin_init_func init_func = (motifgpt_plugin_init_func)dlsym(handle, "motifgpt_plugin_init");
+                    if (init_func) {
+                        motifgpt_plugin_t* plugin = init_func();
+                        if (plugin) {
+                            printf("Loaded plugin: %s\n", plugin->plugin_name);
+                            for (int i = 0; i < plugin->num_tools; i++) {
+                                if (num_registry_tools < MAX_TOOLS) {
+                                    registry_tools[num_registry_tools++] = &plugin->tools[i];
+                                }
+                            }
+                        }
+                    } else {
+                        fprintf(stderr, "Failed to find motifgpt_plugin_init in %s: %s\n", path, dlerror());
+                    }
+                } else {
+                    fprintf(stderr, "Failed to load %s: %s\n", path, dlerror());
+                }
+            }
+        }
+        closedir(dir);
+    } else {
+        printf("Plugin directory '%s' not found.\n", plugin_dir);
+    }
+}
+
+void append_tools_to_system_prompt(char* buffer, size_t buffer_size) {
+    if (num_registry_tools == 0) return;
+    
+    const char* header = "\n\nYou have access to the following tools. To call a tool, you MUST output a JSON block inside a <tool_call> tag. Wait for the user to provide the tool result in a <tool_result> tag. DO NOT output anything else when calling a tool.\nFormat:\n<tool_call>{\"name\": \"tool_name\", \"args\": {\"arg1\": \"val1\"}}</tool_call>\n\nAvailable tools:\n";
+    strncat(buffer, header, buffer_size - strlen(buffer) - 1);
+    
+    for (int i = 0; i < num_registry_tools; i++) {
+        char tool_desc[2048];
+        snprintf(tool_desc, sizeof(tool_desc), "- %s: %s\n  Parameters: %s\n", registry_tools[i]->name, registry_tools[i]->description, registry_tools[i]->parameters_schema);
+        strncat(buffer, tool_desc, buffer_size - strlen(buffer) - 1);
+    }
+}
+
+void start_llm_request_internal(bool from_tool_call); // forward declaration
+
+void execute_tool_call_and_continue(const char* tool_call_json) {
+    cJSON* json = cJSON_Parse(tool_call_json);
+    if (!json) {
+        add_message_to_history(DP_ROLE_USER, "<tool_result>{\"error\": \"Invalid JSON\"}</tool_result>", NULL, NULL);
+        start_llm_request_internal(true);
+        return;
+    }
+    
+    cJSON* name_node = cJSON_GetObjectItemCaseSensitive(json, "name");
+    cJSON* args_node = cJSON_GetObjectItemCaseSensitive(json, "args");
+    
+    if (!cJSON_IsString(name_node)) {
+        add_message_to_history(DP_ROLE_USER, "<tool_result>{\"error\": \"Missing tool name\"}</tool_result>", NULL, NULL);
+        cJSON_Delete(json);
+        start_llm_request_internal(true);
+        return;
+    }
+    
+    const char* tool_name = name_node->valuestring;
+    char* args_str = args_node ? cJSON_PrintUnformatted(args_node) : strdup("{}");
+    
+    char* result = NULL;
+    for (int i = 0; i < num_registry_tools; i++) {
+        if (strcmp(registry_tools[i]->name, tool_name) == 0) {
+            result = registry_tools[i]->execute(args_str);
+            break;
+        }
+    }
+    
+    char result_msg[8192];
+    if (result) {
+        snprintf(result_msg, sizeof(result_msg), "<tool_result>%s</tool_result>", result);
+        free(result);
+    } else {
+        snprintf(result_msg, sizeof(result_msg), "<tool_result>{\"error\": \"Unknown tool\"}</tool_result>");
+    }
+    
+    free(args_str);
+    cJSON_Delete(json);
+    
+    add_message_to_history(DP_ROLE_USER, result_msg, NULL, NULL);
+    append_to_conversation(result_msg);
+    append_to_conversation("\n");
+    start_llm_request_internal(true);
+}
+
 // Globals
 Widget app_shell;
 Widget conversation_text;
@@ -278,14 +385,32 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
                             append_to_conversation(current_assistant_prefix);
                         }
                         append_to_conversation("\n");
+                        
+                        bool is_tool_call = false;
+                        char tool_call_json[8192] = "";
                         if (current_assistant_response_buffer && current_assistant_response_len > 0) {
                             add_message_to_history(DP_ROLE_ASSISTANT, current_assistant_response_buffer, NULL, NULL);
+                            
+                            const char* tc_start = strstr(current_assistant_response_buffer, "<tool_call>");
+                            const char* tc_end = strstr(current_assistant_response_buffer, "</tool_call>");
+                            if (tc_start && tc_end && tc_end > tc_start) {
+                                is_tool_call = true;
+                                size_t tc_len = tc_end - tc_start - 11;
+                                if (tc_len < sizeof(tool_call_json)) {
+                                    strncpy(tool_call_json, tc_start + 11, tc_len);
+                                    tool_call_json[tc_len] = '\0';
+                                }
+                            }
                         } else if (assistant_is_replying && current_assistant_response_len == 0) {
                             add_message_to_history(DP_ROLE_ASSISTANT, "", NULL, NULL);
                         }
                         if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
                         current_assistant_response_len = 0;
                         assistant_is_replying = false; prefix_already_added_for_current_reply = false;
+                        
+                        if (is_tool_call) {
+                            execute_tool_call_and_continue(tool_call_json);
+                        }
                         break;
                      case PIPE_MSG_ERROR:
                         show_error_dialog(msg.data); append_to_conversation(msg.data); append_to_conversation("\n");
@@ -438,6 +563,10 @@ void start_llm_request() {
         attached_image_path[0] = '\0'; attached_image_mime_type[0] = '\0';
     }
 
+    start_llm_request_internal(false);
+}
+
+void start_llm_request_internal(bool from_tool_call) {
     llm_thread_data_t *thread_data = malloc(sizeof(llm_thread_data_t));
     if (!thread_data) { perror("malloc llm_thread_data"); return; }
     thread_data->system_prompt_buffer[0] = '\0';
@@ -451,14 +580,11 @@ void start_llm_request() {
     }
 
     generate_system_prompt(thread_data->system_prompt_buffer, sizeof(thread_data->system_prompt_buffer), current_system_prompt, append_default_system_prompt);
-    // The config.system_prompt pointer will be set inside the thread to point to system_prompt_buffer.
-    // This avoids passing a pointer to a stack variable to the new thread.
+    append_tools_to_system_prompt(thread_data->system_prompt_buffer, sizeof(thread_data->system_prompt_buffer));
 
     thread_data->config.temperature = 0.7; thread_data->config.max_tokens = DEFAULT_MAX_TOKENS;
     thread_data->config.stream = true;
 
-    // Serialize chat history to temp file to avoid race condition.
-    // We use file serialization because dp_message_t is opaque and we cannot safely deep-copy it in memory without library headers.
     char temp_filename[PATH_MAX];
     strcpy(temp_filename, "/tmp/motifgpt_hist_XXXXXX");
     int fd = mkstemp(temp_filename);
@@ -467,7 +593,7 @@ void start_llm_request() {
         if (dp_serialize_messages_to_file(chat_history, chat_history_count, temp_filename) == 0) {
              strncpy(thread_data->temp_history_filename, temp_filename, PATH_MAX - 1);
              thread_data->temp_history_filename[PATH_MAX - 1] = '\0';
-             thread_data->config.messages = NULL; // Will be loaded in thread
+             thread_data->config.messages = NULL; 
              thread_data->config.num_messages = 0;
         } else {
              perror("dp_serialize_messages_to_file");
@@ -483,7 +609,12 @@ void start_llm_request() {
         return;
     }
 
-    snprintf(current_assistant_prefix, sizeof(current_assistant_prefix), "%s: ", ASSISTANT_NICKNAME);
+    if (!from_tool_call) {
+        snprintf(current_assistant_prefix, sizeof(current_assistant_prefix), "%s: ", ASSISTANT_NICKNAME);
+    } else {
+        snprintf(current_assistant_prefix, sizeof(current_assistant_prefix), "%s (tool result): ", USER_NICKNAME);
+    }
+    
     pthread_t tid;
     if (pthread_create(&tid, NULL, perform_llm_request_thread, thread_data) != 0) {
         perror("pthread_create llm_request");
