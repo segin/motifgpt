@@ -204,8 +204,6 @@ Widget create_provider_settings_tab(Widget parent, const char *prefix,
                                     int tab_index);
 void create_general_tab(Widget parent);
 void settings_disable_history_limit_toggle_cb(Widget, XtPointer, XtPointer);
-static void openai_base_url_focus_in_cb(Widget, XtPointer, XtPointer);
-static void openai_base_url_focus_out_cb(Widget, XtPointer, XtPointer);
 void setup_ui(void);
 
 
@@ -635,12 +633,6 @@ static void settings_text_field_focus_out_cb(Widget w, XtPointer client_data, Xt
 }
 
 
-static void openai_base_url_focus_in_cb(Widget w, XtPointer client_data, XtPointer call_data) {
-    settings_text_field_focus_in_cb(w, (XtPointer)DEFAULT_OPENAI_BASE_URL, call_data);
-}
-static void openai_base_url_focus_out_cb(Widget w, XtPointer client_data, XtPointer call_data) {
-    settings_text_field_focus_out_cb(w, (XtPointer)DEFAULT_OPENAI_BASE_URL, call_data);
-}
 
 
 void cut_callback(Widget w, XtPointer client_data, XtPointer call_data) {
@@ -1215,7 +1207,7 @@ void *perform_get_models_thread(void *arg) {
         if (model_list_struct && model_list_struct->error_message) {
              snprintf(err_buf, sizeof(err_buf), "Error Get Models (HTTP %ld): %s", model_list_struct->http_status_code, model_list_struct->error_message);
         } else if (model_list_struct) { snprintf(err_buf, sizeof(err_buf), "Error Get Models (HTTP %ld): Unknown API error.", model_list_struct->http_status_code);
-        } else { strcpy(err_buf, "Error Get Models: dp_list_models failed critically."); }
+        } else { snprintf(err_buf, sizeof(err_buf), "%s", "Error Get Models: dp_list_models failed critically."); }
         write_pipe_message(PIPE_MSG_MODEL_LIST_ERROR, err_buf);
     }
     write_pipe_message(PIPE_MSG_MODEL_LIST_END, NULL);

@@ -10,7 +10,7 @@ int chat_history_capacity = 0;
 
 void remove_oldest_history_messages(int count_to_remove) {
     if (count_to_remove <= 0 || count_to_remove > chat_history_count) return;
-    for (int i = 0; i < count_to_remove; ++i) dp_free_messages(&chat_history[i], 1);
+    dp_free_messages(chat_history, count_to_remove);
     int remaining_count = chat_history_count - count_to_remove;
     if (remaining_count > 0) memmove(chat_history, &chat_history[count_to_remove], remaining_count * sizeof(dp_message_t));
     chat_history_count = remaining_count;
@@ -52,7 +52,12 @@ void add_message_to_history(dp_message_role_t role, const char* text_content, co
     if (success && new_msg->num_parts > 0) {
         chat_history_count++;
     } else if (new_msg->parts) {
-        dp_free_messages(new_msg, 1);
+        for (size_t i = 0; i < new_msg->num_parts; i++) {
+            if (new_msg->parts[i].text) free(new_msg->parts[i].text);
+        }
+        free(new_msg->parts);
+        new_msg->parts = NULL;
+        new_msg->num_parts = 0;
     } else if (!text_content && !img_base64_data && role == DP_ROLE_USER) { return; }
 }
 
