@@ -2,6 +2,5 @@
 set -e
 echo "Generating build system..."
 mkdir -p m4
-aclocal
-automake --add-missing --copy
-autoconf
+autoreconf -fi
+echo "Now run: ./configure && make"

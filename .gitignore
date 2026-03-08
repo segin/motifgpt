@@ -21,5 +21,34 @@ m4/
 
 # Object files and executables
 *.o
+*.a
 motifgpt
 test_buffer_utils
+test_config
+test_history
+test_stream_handler
+test_utils
+tests/test_settings
+tests/test_utils
+tests/test_history
+tests/test_config
+tests/test_stream_handler
+tests/test_buffer_utils
+test-driver
+ar-lib
+missing
+compile
+depcomp
+install-sh
+py-compile
+
+# Logs and test results
+*.log
+*.trs
+.deps/
+tests/.deps/
+
+# Backups and editor files
+*~
+# .vscode/  <- keep for now unless sure
+notepad-debug.txt

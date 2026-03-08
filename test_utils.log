@@ -1,9 +1,0 @@
-fopen read_file: No such file or directory
-File too large (max 20MB) or ftell error.
-test_read_existing_file passed.
-test_read_empty_file passed.
-test_read_nonexistent_file passed.
-test_read_large_file passed.
-test_base64_encode passed.
-All tests passed!
-PASS test_utils (exit status: 0)
