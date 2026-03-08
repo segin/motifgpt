@@ -1,3 +1,5 @@
+ACLOCAL_AMFLAGS = -I m4
+
 bin_PROGRAMS = motifgpt
 motifgpt_SOURCES = motifgpt.c utils.c motifgpt_config.c motifgpt_history.c motifgpt_chat.c buffer_utils.c
 
