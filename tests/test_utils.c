@@ -109,10 +109,56 @@ void test_read_file_to_buffer() {
     printf("read_file_to_buffer tests passed!\n");
 }
 
+void test_get_image_mime_type() {
+    printf("Testing get_image_mime_type...\n");
+
+    // Valid PNG (8 bytes)
+    const unsigned char png_header[] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
+    const char* mime = get_image_mime_type(png_header, 8);
+    assert(mime != NULL && strcmp(mime, "image/png") == 0);
+
+    // Valid JPEG (2 bytes)
+    const unsigned char jpeg_header[] = {0xff, 0xd8};
+    mime = get_image_mime_type(jpeg_header, 2);
+    assert(mime != NULL && strcmp(mime, "image/jpeg") == 0);
+
+    // Valid GIF87a (6 bytes)
+    const unsigned char gif87_header[] = {'G', 'I', 'F', '8', '7', 'a'};
+    mime = get_image_mime_type(gif87_header, 6);
+    assert(mime != NULL && strcmp(mime, "image/gif") == 0);
+
+    // Valid GIF89a (6 bytes)
+    const unsigned char gif89_header[] = {'G', 'I', 'F', '8', '9', 'a'};
+    mime = get_image_mime_type(gif89_header, 6);
+    assert(mime != NULL && strcmp(mime, "image/gif") == 0);
+
+    // NULL buffer
+    assert(get_image_mime_type(NULL, 10) == NULL);
+
+    // Zero length
+    assert(get_image_mime_type(png_header, 0) == NULL);
+
+    // Too short for PNG
+    assert(get_image_mime_type(png_header, 7) == NULL);
+
+    // Too short for JPEG (1 byte)
+    assert(get_image_mime_type(jpeg_header, 1) == NULL);
+
+    // Too short for GIF (5 bytes)
+    assert(get_image_mime_type(gif87_header, 5) == NULL);
+
+    // Invalid magic numbers
+    const unsigned char invalid_header[] = {0x00, 0x01, 0x02, 0x03};
+    assert(get_image_mime_type(invalid_header, 4) == NULL);
+
+    printf("get_image_mime_type tests passed!\n");
+}
+
 int main() {
     test_generate_system_prompt();
     test_base64_encode();
     test_read_file_to_buffer();
+    test_get_image_mime_type();
     printf("All tests passed successfully!\n");
     return 0;
 }
