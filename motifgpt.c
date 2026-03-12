@@ -351,7 +351,7 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
                          }
                      }
                      if (batch_len + prefix_len <= BATCH_CAPACITY) {
-                         strcpy(batch_buffer + batch_len, current_assistant_prefix);
+                         snprintf(batch_buffer + batch_len, sizeof(batch_buffer) - batch_len, "%s", current_assistant_prefix);
                          batch_len += prefix_len;
                      } else {
                          append_to_conversation(current_assistant_prefix);
@@ -369,7 +369,7 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
                  if (token_len > BATCH_CAPACITY) {
                      append_to_conversation(msg.data);
                  } else {
-                     strcpy(batch_buffer + batch_len, msg.data);
+                     snprintf(batch_buffer + batch_len, sizeof(batch_buffer) - batch_len, "%s", msg.data);
                      batch_len += token_len;
                  }
              } else {
@@ -545,7 +545,8 @@ void start_llm_request() {
     } else {
          snprintf(display_msg_text_part, sizeof(display_msg_text_part), "%s: ", USER_NICKNAME);
     }
-    char full_display_msg[DISPLAY_MSG_BUF_SIZE]; strcpy(full_display_msg, display_msg_text_part);
+    char full_display_msg[DISPLAY_MSG_BUF_SIZE];
+    snprintf(full_display_msg, sizeof(full_display_msg), "%s", display_msg_text_part);
     if (attached_image_base64_data) {
         char path_copy[PATH_MAX]; strncpy(path_copy, attached_image_path, PATH_MAX); path_copy[PATH_MAX-1] = '\0';
         snprintf(full_display_msg, sizeof(full_display_msg), "%s [Image Attached: %s]\n", display_msg_text_part, basename(path_copy));
@@ -586,7 +587,7 @@ void start_llm_request_internal(bool from_tool_call) {
     thread_data->config.stream = true;
 
     char temp_filename[PATH_MAX];
-    strcpy(temp_filename, "/tmp/motifgpt_hist_XXXXXX");
+    snprintf(temp_filename, sizeof(temp_filename), "%s", "/tmp/motifgpt_hist_XXXXXX");
     int fd = mkstemp(temp_filename);
     if (fd != -1) {
         close(fd);
