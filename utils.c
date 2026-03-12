@@ -85,7 +85,9 @@ char* base64_encode(const unsigned char *data, size_t input_length) {
         encoded_data[j++] = base64_chars[(triple >> 6) & 0x3F];
         encoded_data[j++] = base64_chars[(triple >> 0) & 0x3F];
     }
-    for (size_t i = 0; i < (3 - input_length % 3) % 3; i++) encoded_data[output_length - 1 - i] = '=';
+
+    size_t padding = (3 - input_length % 3) % 3;
+    for (size_t i = 0; i < padding; i++) encoded_data[output_length - 1 - i] = '=';
     encoded_data[output_length] = '\0';
     return encoded_data;
 }
