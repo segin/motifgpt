@@ -309,6 +309,9 @@ Widget create_provider_settings_tab(Widget parent, const char *prefix,
                                     int tab_index);
 void create_general_tab(Widget parent);
 void settings_disable_history_limit_toggle_cb(Widget, XtPointer, XtPointer);
+void setup_menus(Widget menu_bar);
+void setup_conversation_area(Widget parent);
+void setup_input_area(Widget parent);
 void setup_ui(void);
 
 
@@ -1693,21 +1696,10 @@ void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     XtPopup(settings_shell, XtGrabNone);
 }
 
-void setup_ui(void) {
-    Widget main_window, menu_bar, main_form;
-    Widget chat_area_paned, input_form, bottom_buttons_form, open_chat_button, save_chat_as_button, file_sep_open;
-    Widget file_menu, file_cascade, quit_button_widget, clear_chat_button, settings_button, file_sep_exit;
-    Widget edit_menu, edit_cascade;
-    Widget cut_button, copy_button, paste_button, select_all_button, edit_sep;
+void setup_menus(Widget menu_bar) {
+    Widget file_menu, file_cascade, open_chat_button, save_chat_as_button, file_sep_open, settings_button, clear_chat_button, file_sep_exit, quit_button_widget;
+    Widget edit_menu, edit_cascade, cut_button, copy_button, paste_button, edit_sep, select_all_button;
     XmString acc_text_ctrl_q, acc_text_ctrl_o, acc_text_ctrl_x, acc_text_ctrl_c, acc_text_ctrl_v, acc_text_ctrl_a;
-
-    Widget temp_tf = XmCreateTextField(app_shell, "tempTf", NULL, 0);
-    XtVaGetValues(temp_tf, XmNforeground, &normal_fg_color, NULL);
-    XtDestroyWidget(temp_tf);
-
-
-    main_window = XmCreateMainWindow(app_shell, "mainWindow", NULL, 0); XtManageChild(main_window);
-    menu_bar = XmCreateMenuBar(main_window, "menuBar", NULL, 0); XtManageChild(menu_bar);
 
     file_menu = XmCreatePulldownMenu(menu_bar, "fileMenu", NULL, 0);
     file_cascade = XtVaCreateManagedWidget("File", xmCascadeButtonWidgetClass, menu_bar, XmNsubMenuId, file_menu, XmNmnemonic, XK_F, NULL);
@@ -1741,10 +1733,10 @@ void setup_ui(void) {
     acc_text_ctrl_a = XmStringCreateLocalized("Ctrl+A");
     select_all_button = XtVaCreateManagedWidget("Select All", xmPushButtonWidgetClass, edit_menu, XmNmnemonic, XK_A, XmNaccelerator, "Ctrl<Key>a", XmNacceleratorText, acc_text_ctrl_a, NULL);
     XmStringFree(acc_text_ctrl_a); XtAddCallback(select_all_button, XmNactivateCallback, select_all_callback, NULL);
+}
 
-    main_form = XtVaCreateWidget("mainForm", xmFormWidgetClass, main_window, XmNwidth, 600, XmNheight, 450, NULL); XtManageChild(main_form);
-    chat_area_paned = XtVaCreateManagedWidget("chatAreaPaned", xmPanedWindowWidgetClass, main_form, XmNtopAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNsashWidth, 1, XmNsashHeight, 1, NULL);
-    Widget scrolled_conv_win = XmCreateScrolledWindow(chat_area_paned, "scrolledConvWin", NULL, 0);
+void setup_conversation_area(Widget parent) {
+    Widget scrolled_conv_win = XmCreateScrolledWindow(parent, "scrolledConvWin", NULL, 0);
     XtVaSetValues(scrolled_conv_win, XmNpaneMinimum, 100, XmNpaneMaximum, 1000, XmNscrollingPolicy, XmAUTOMATIC, NULL);
     conversation_text = XmCreateText(scrolled_conv_win, "conversationText", NULL, 0);
     XtVaSetValues(conversation_text, XmNeditMode, XmMULTI_LINE_EDIT, XmNeditable, False, XmNcursorPositionVisible, False, XmNwordWrap, True, XmNscrollHorizontal, False, XmNrows, 15, XmNbackground, WhitePixelOfScreen(XtScreen(conversation_text)), XmNresizeWidth, False, NULL);
@@ -1753,9 +1745,11 @@ void setup_ui(void) {
     XtAddCallback(conversation_text, XmNfocusCallback, focus_callback, NULL);
     XtAddEventHandler(conversation_text, ButtonPressMask, False, popup_handler, NULL);
     XtAddEventHandler(conversation_text, KeyPressMask, False, app_text_key_press_handler, NULL);
+}
 
-
-    input_form = XtVaCreateWidget("inputForm", xmFormWidgetClass, chat_area_paned, XmNpaneMinimum, 120, XmNpaneMaximum, 250, XmNfractionBase, 10, NULL); XtManageChild(input_form);
+void setup_input_area(Widget parent) {
+    Widget input_form, bottom_buttons_form, scrolled_input_win;
+    input_form = XtVaCreateWidget("inputForm", xmFormWidgetClass, parent, XmNpaneMinimum, 120, XmNpaneMaximum, 250, XmNfractionBase, 10, NULL); XtManageChild(input_form);
     bottom_buttons_form = XtVaCreateManagedWidget("bottomButtonsForm", xmFormWidgetClass, input_form, XmNbottomAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNheight, 35, NULL);
     attach_image_button = XtVaCreateManagedWidget("Attach Image...", xmPushButtonWidgetClass, bottom_buttons_form, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, 5, XmNtopAttachment, XmATTACH_FORM, XmNtopOffset, 2, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 2, NULL);
     XtAddCallback(attach_image_button, XmNactivateCallback, attach_image_callback, NULL);
@@ -1763,7 +1757,7 @@ void setup_ui(void) {
     XtAddCallback(send_button, XmNactivateCallback, send_message_callback, NULL);
     XtVaSetValues(input_form, XmNdefaultButton, send_button, NULL);
 
-    Widget scrolled_input_win = XmCreateScrolledWindow(input_form, "scrolledInputWin", NULL, 0);
+    scrolled_input_win = XmCreateScrolledWindow(input_form, "scrolledInputWin", NULL, 0);
     XtVaSetValues(scrolled_input_win, XmNtopAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_WIDGET, XmNbottomWidget, bottom_buttons_form, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNscrollingPolicy, XmAUTOMATIC, NULL);
     input_text = XmCreateText(scrolled_input_win, "inputText", NULL, 0);
     XtVaSetValues(input_text, XmNeditMode, XmMULTI_LINE_EDIT, XmNrows, 3, XmNwordWrap, True, XmNbackground, WhitePixelOfScreen(XtScreen(input_text)), XmNresizeWidth, False, NULL);
@@ -1773,6 +1767,25 @@ void setup_ui(void) {
     XtAddEventHandler(input_text, KeyPressMask, True, app_text_key_press_handler, NULL);
     XtAddCallback(input_text, XmNfocusCallback, focus_callback, NULL);
     XtAddEventHandler(input_text, ButtonPressMask, False, popup_handler, NULL);
+}
+
+void setup_ui(void) {
+    Widget main_window, menu_bar, main_form, chat_area_paned;
+
+    Widget temp_tf = XmCreateTextField(app_shell, "tempTf", NULL, 0);
+    XtVaGetValues(temp_tf, XmNforeground, &normal_fg_color, NULL);
+    XtDestroyWidget(temp_tf);
+
+    main_window = XmCreateMainWindow(app_shell, "mainWindow", NULL, 0); XtManageChild(main_window);
+    menu_bar = XmCreateMenuBar(main_window, "menuBar", NULL, 0); XtManageChild(menu_bar);
+
+    setup_menus(menu_bar);
+
+    main_form = XtVaCreateWidget("mainForm", xmFormWidgetClass, main_window, XmNwidth, 600, XmNheight, 450, NULL); XtManageChild(main_form);
+    chat_area_paned = XtVaCreateManagedWidget("chatAreaPaned", xmPanedWindowWidgetClass, main_form, XmNtopAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNsashWidth, 1, XmNsashHeight, 1, NULL);
+
+    setup_conversation_area(chat_area_paned);
+    setup_input_area(chat_area_paned);
 
     popup_menu = create_text_popup_menu(main_window);
 
