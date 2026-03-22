@@ -81,3 +81,20 @@ void dp_free_messages(dp_message_t *messages, size_t count) {
     // So `dp_free_messages` DOES NOT free the array pointer. It only frees contents.
     // So my mock implementation is correct (only freeing parts).
 }
+
+int dp_serialize_messages_to_fd(dp_message_t *msgs, size_t count, int fd) {
+    if (fd < 0) return -1;
+    // For mock, just write some data
+    const char *data = "mock serialize data\n";
+    if (write(fd, data, strlen(data)) == (ssize_t)strlen(data)) return 0;
+    return -1;
+}
+
+int dp_serialize_messages_to_file(dp_message_t *msgs, size_t count, const char *filename) {
+    if (!filename) return -1;
+    int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd == -1) return -1;
+    int ret = dp_serialize_messages_to_fd(msgs, count, fd);
+    close(fd);
+    return ret;
+}
