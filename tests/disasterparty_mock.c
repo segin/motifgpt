@@ -9,5 +9,6 @@ int dp_message_add_base64_image_part(dp_message_t *msg, const char *mime_type, c
 void dp_free_messages(dp_message_t *msgs, size_t count) {}
 int dp_list_models(dp_context_t *ctx, dp_model_list_t **list) { return 0; }
 void dp_free_model_list(dp_model_list_t *list) {}
+int dp_serialize_messages_to_fd(dp_message_t *msgs, size_t count, int fd) { return 0; }
 int dp_serialize_messages_to_file(dp_message_t *msgs, size_t count, const char *filename) { return 0; }
 int dp_deserialize_messages_from_file(const char *filename, dp_message_t **msgs, size_t *count) { return 0; }

@@ -73,6 +73,7 @@ void dp_free_messages(dp_message_t *msgs, size_t count);
 int dp_list_models(dp_context_t *ctx, dp_model_list_t **list);
 void dp_free_model_list(dp_model_list_t *list);
 int dp_serialize_messages_to_file(dp_message_t *msgs, size_t count, const char *filename);
+int dp_serialize_messages_to_fd(dp_message_t *msgs, size_t count, int fd);
 int dp_deserialize_messages_from_file(const char *filename, dp_message_t **msgs, size_t *count);
 
 #endif

@@ -31,10 +31,10 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <errno.h>
 #include <pthread.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 #include <libgen.h>
 #include <wordexp.h>
 #include <limits.h>
@@ -589,14 +589,15 @@ void start_llm_request_internal(bool from_tool_call) {
     strcpy(temp_filename, "/tmp/motifgpt_hist_XXXXXX");
     int fd = mkstemp(temp_filename);
     if (fd != -1) {
-        close(fd);
-        if (dp_serialize_messages_to_file(chat_history, chat_history_count, temp_filename) == 0) {
+        if (dp_serialize_messages_to_fd(chat_history, chat_history_count, fd) == 0) {
+             close(fd);
              strncpy(thread_data->temp_history_filename, temp_filename, PATH_MAX - 1);
              thread_data->temp_history_filename[PATH_MAX - 1] = '\0';
              thread_data->config.messages = NULL; 
              thread_data->config.num_messages = 0;
         } else {
-             perror("dp_serialize_messages_to_file");
+             perror("dp_serialize_messages_to_fd");
+             close(fd);
              unlink(temp_filename);
              free(thread_data);
              show_error_dialog("Failed to serialize chat history for thread.");
@@ -1043,12 +1044,18 @@ void file_selection_save_as_ok_callback(Widget w, XtPointer client_data, XtPoint
     XmStringGetLtoR(cbs->value, XmFONTLIST_DEFAULT_TAG, &filename);
     if (!filename || strlen(filename) == 0) { if(filename) XtFree(filename); return; }
 
-    if (dp_serialize_messages_to_file(chat_history, chat_history_count, filename) == 0) {
-        char success_msg[PATH_MAX + 50];
-        snprintf(success_msg, sizeof(success_msg), "\n--- Conversation Saved to: %s ---\n", basename(filename));
-        append_to_conversation(success_msg);
+    int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd != -1) {
+        if (dp_serialize_messages_to_fd(chat_history, chat_history_count, fd) == 0) {
+            char success_msg[PATH_MAX + 50];
+            snprintf(success_msg, sizeof(success_msg), "\n--- Conversation Saved to: %s ---\n", basename(filename));
+            append_to_conversation(success_msg);
+        } else {
+            show_error_dialog("Failed to save conversation to file.");
+        }
+        close(fd);
     } else {
-        show_error_dialog("Failed to save conversation to file.");
+        show_error_dialog("Failed to open file for saving.");
     }
 
     if(filename) XtFree(filename);
