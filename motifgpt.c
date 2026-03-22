@@ -152,14 +152,37 @@ void load_plugins(const char* plugin_dir) {
 
 void append_tools_to_system_prompt(char* buffer, size_t buffer_size) {
     if (num_registry_tools == 0) return;
-    
+
+    size_t current_len = strlen(buffer);
     const char* header = "\n\nYou have access to the following tools. To call a tool, you MUST output a JSON block inside a <tool_call> tag. Wait for the user to provide the tool result in a <tool_result> tag. DO NOT output anything else when calling a tool.\nFormat:\n<tool_call>{\"name\": \"tool_name\", \"args\": {\"arg1\": \"val1\"}}</tool_call>\n\nAvailable tools:\n";
-    strncat(buffer, header, buffer_size - strlen(buffer) - 1);
-    
+
+    size_t remaining = buffer_size - current_len;
+    if (remaining > 1) {
+        int written = snprintf(buffer + current_len, remaining, "%s", header);
+        if (written > 0) {
+            if ((size_t)written >= remaining) {
+                current_len += remaining - 1;
+            } else {
+                current_len += written;
+            }
+        }
+    }
+
     for (int i = 0; i < num_registry_tools; i++) {
-        char tool_desc[2048];
-        snprintf(tool_desc, sizeof(tool_desc), "- %s: %s\n  Parameters: %s\n", registry_tools[i]->name, registry_tools[i]->description, registry_tools[i]->parameters_schema);
-        strncat(buffer, tool_desc, buffer_size - strlen(buffer) - 1);
+        remaining = buffer_size - current_len;
+        if (remaining <= 1) break;
+
+        int written = snprintf(buffer + current_len, remaining, "- %s: %s\n  Parameters: %s\n",
+                               registry_tools[i]->name,
+                               registry_tools[i]->description,
+                               registry_tools[i]->parameters_schema);
+        if (written > 0) {
+            if ((size_t)written >= remaining) {
+                current_len += remaining - 1;
+            } else {
+                current_len += written;
+            }
+        }
     }
 }
 
