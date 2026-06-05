@@ -119,6 +119,8 @@
 void render_all_history();
 void start_llm_request_internal(bool from_tool_call);
 void add_message_to_history(dp_message_role_t role, const char *text, const char *image_mime, const char *image_base64);
+void show_error_dialog(const char* message);
+void save_settings();
 
 
 // Global registry for tools and plugins
