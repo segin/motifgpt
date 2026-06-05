@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <errno.h>
@@ -30,11 +31,21 @@ dp_message_t *chat_history = NULL;
 int chat_history_count = 5;
 
 // Mock functions
+int dp_serialize_messages_to_fd(dp_message_t *messages, size_t count, int fd) {
+    printf("Mock: Serializing %zu messages to fd %d\n", count, fd);
+    if (write(fd, "mock data", 9) == 9) return 0;
+    return -1;
+}
+
 int dp_serialize_messages_to_file(dp_message_t *messages, size_t count, const char *filename) {
     printf("Mock: Serializing %zu messages to %s\n", count, filename);
     // Create the file to simulate success
-    FILE *f = fopen(filename, "w");
-    if (f) { fprintf(f, "mock data"); fclose(f); return 0; }
+    int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd != -1) {
+        int ret = dp_serialize_messages_to_fd(messages, count, fd);
+        close(fd);
+        return ret;
+    }
     return -1;
 }
 
@@ -66,12 +77,13 @@ void test_start_logic(llm_thread_data_t *thread_data) {
         perror("mkstemp history");
         return;
     }
-    close(fd);
 
-    if (dp_serialize_messages_to_file(chat_history, chat_history_count, temp_hist_template) != 0) {
+    if (dp_serialize_messages_to_fd(chat_history, chat_history_count, fd) != 0) {
+        close(fd);
         unlink(temp_hist_template);
         return;
     }
+    close(fd);
 
     strncpy(thread_data->temp_history_filename, temp_hist_template, PATH_MAX - 1);
     thread_data->temp_history_filename[PATH_MAX - 1] = '\0';

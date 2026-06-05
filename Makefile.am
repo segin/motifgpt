@@ -1,7 +1,7 @@
 ACLOCAL_AMFLAGS = -I m4
 
 bin_PROGRAMS = motifgpt
-motifgpt_SOURCES = motifgpt.c utils.c motifgpt_config.c motifgpt_history.c motifgpt_chat.c buffer_utils.c
+motifgpt_SOURCES = motifgpt.c utils.c motifgpt_config.c motifgpt_history.c motifgpt_chat.c buffer_utils.c disasterparty_impl.c
 
 motifgpt_CPPFLAGS = @MOTIFGPT_CPPFLAGS@
 motifgpt_LDADD = @MOTIFGPT_LIBS@
