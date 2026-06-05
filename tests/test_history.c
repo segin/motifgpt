@@ -9,26 +9,26 @@ int current_max_history_messages = 10;
 bool history_limits_disabled = false;
 
 // Mock disasterparty functions since we don't link with the real library for this unit test
-bool dp_message_add_text_part(dp_message_t *msg, const char *text) {
-    if (!msg) return false;
+int dp_message_add_text_part(dp_message_t *msg, const char *text) {
+    if (!msg) return 0;
     dp_content_part_t *new_parts = realloc(msg->parts, (msg->num_parts + 1) * sizeof(dp_content_part_t));
-    if (!new_parts) return false;
+    if (!new_parts) return 0;
     msg->parts = new_parts;
     msg->parts[msg->num_parts].type = DP_CONTENT_PART_TEXT;
     msg->parts[msg->num_parts].text = text ? strdup(text) : NULL;
     msg->num_parts++;
-    return true;
+    return 1;
 }
 
-bool dp_message_add_base64_image_part(dp_message_t *msg, const char *mime_type, const char *base64_data) {
-    if (!msg) return false;
+int dp_message_add_base64_image_part(dp_message_t *msg, const char *mime_type, const char *base64_data) {
+    if (!msg) return 0;
     dp_content_part_t *new_parts = realloc(msg->parts, (msg->num_parts + 1) * sizeof(dp_content_part_t));
-    if (!new_parts) return false;
+    if (!new_parts) return 0;
     msg->parts = new_parts;
     msg->parts[msg->num_parts].type = DP_CONTENT_PART_IMAGE_BASE64;
     msg->parts[msg->num_parts].text = strdup("[IMAGE]"); // For simplicity in mock
     msg->num_parts++;
-    return true;
+    return 1;
 }
 
 void dp_free_messages(dp_message_t *messages, size_t count) {

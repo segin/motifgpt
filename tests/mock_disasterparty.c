@@ -40,44 +40,9 @@ void dp_free_messages(dp_message_t *messages, size_t count) {
             free(messages[i].parts);
         }
     }
-    // We do NOT free `messages` itself here because it might be part of an array allocated by the caller (like chat_history).
-    // The caller (history.c) manages the array allocation.
-    // Wait, motifgpt.c calls `dp_free_messages(&chat_history[i], 1)` in loop.
-    // And `dp_free_messages(chat_history, chat_history_count)` in free_chat_history.
-    // The library function likely frees the content of messages, but NOT the array itself unless it allocated it?
-    // Actually, `dp_free_messages` usually frees the array too if it takes `messages` pointer.
-    // But `remove_oldest_history_messages` calls it on `&chat_history[i]`.
-    // If `dp_free_messages` frees the pointer passed, then `&chat_history[i]` would be invalid if it tries to free a pointer into the middle of an array.
-    // So `dp_free_messages` probably only frees the *contents* (deep free) but not the `messages` pointer itself if it's not the start of allocation?
-    // Or maybe it does `free(messages)` at the end.
-    // If it does, `remove_oldest_history_messages` is BUGGY because it passes `&chat_history[i]`.
-    // Let's check `remove_oldest_history_messages` in `motifgpt.c`.
-
-    /*
-    void remove_oldest_history_messages(int count_to_remove) {
-        if (count_to_remove <= 0 || count_to_remove > chat_history_count) return;
-        for (int i = 0; i < count_to_remove; ++i) dp_free_messages(&chat_history[i], 1);
-        int remaining_count = chat_history_count - count_to_remove;
-        if (remaining_count > 0) memmove(chat_history, &chat_history[count_to_remove], remaining_count * sizeof(dp_message_t));
-        chat_history_count = remaining_count;
-    }
-    */
-
-    // It calls `dp_free_messages(&chat_history[i], 1)`.
-    // If `dp_free_messages` frees the pointer, this is Double Free or Invalid Free.
-    // So `dp_free_messages` MUST NOT free the pointer `messages` if count is 1?
-    // Or maybe `dp_free_messages` never frees the array pointer, just the contents?
-    // But `free_chat_history` calls:
-    /*
-    void free_chat_history() {
-        if (chat_history) {
-            dp_free_messages(chat_history, chat_history_count);
-            free(chat_history); chat_history = NULL;
-        }
-        ...
-    }
-    */
-    // Here `free(chat_history)` is called explicitly.
-    // So `dp_free_messages` DOES NOT free the array pointer. It only frees contents.
-    // So my mock implementation is correct (only freeing parts).
+    // Note: dp_free_messages is designed to perform a deep free of the contents
+    // of the messages array (e.g., text parts, image parts). It does NOT
+    // deallocate the 'messages' pointer itself. The caller (e.g., history.c)
+    // is responsible for managing the allocation and deallocation of the
+    // chat_history array.
 }
