@@ -32,10 +32,10 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <errno.h>
 #include <pthread.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 #include <libgen.h>
 #include <wordexp.h>
 #include <limits.h>
@@ -179,14 +179,37 @@ void load_plugins(const char* plugin_dir) {
 
 void append_tools_to_system_prompt(char* buffer, size_t buffer_size) {
     if (num_registry_tools == 0) return;
-    
+
+    size_t current_len = strlen(buffer);
     const char* header = "\n\nYou have access to the following tools. To call a tool, you MUST output a JSON block inside a <tool_call> tag. The system will provide the result in a message with the TOOL role. DO NOT output anything else when calling a tool.\nFormat:\n<tool_call>{\"name\": \"tool_name\", \"args\": {\"arg1\": \"val1\"}}</tool_call>\n\nAvailable tools:\n";
-    strncat(buffer, header, buffer_size - strlen(buffer) - 1);
-    
+
+    size_t remaining = buffer_size - current_len;
+    if (remaining > 1) {
+        int written = snprintf(buffer + current_len, remaining, "%s", header);
+        if (written > 0) {
+            if ((size_t)written >= remaining) {
+                current_len += remaining - 1;
+            } else {
+                current_len += written;
+            }
+        }
+    }
+
     for (int i = 0; i < num_registry_tools; i++) {
-        char tool_desc[2048];
-        snprintf(tool_desc, sizeof(tool_desc), "- %s: %s\n  Parameters: %s\n", registry_tools[i]->name, registry_tools[i]->description, registry_tools[i]->parameters_schema);
-        strncat(buffer, tool_desc, buffer_size - strlen(buffer) - 1);
+        remaining = buffer_size - current_len;
+        if (remaining <= 1) break;
+
+        int written = snprintf(buffer + current_len, remaining, "- %s: %s\n  Parameters: %s\n",
+                               registry_tools[i]->name,
+                               registry_tools[i]->description,
+                               registry_tools[i]->parameters_schema);
+        if (written > 0) {
+            if ((size_t)written >= remaining) {
+                current_len += remaining - 1;
+            } else {
+                current_len += written;
+            }
+        }
     }
 }
 
@@ -233,10 +256,9 @@ void *perform_tool_call_thread(void *arg) {
     // Wait, adding to history might trigger UI render if we aren't careful.
     // Let's add to history here and just signal the UI to render and continue.
     
-    pthread_mutex_lock(&history_mutex);
+    // add_message_to_history takes history_mutex itself; don't double-lock (non-recursive mutex).
     add_message_to_history(DP_ROLE_TOOL, result_to_send, NULL, NULL);
-    pthread_mutex_unlock(&history_mutex);
-    
+
     write_pipe_message(PIPE_MSG_TOOL_RESULT, NULL);
     
     free(result_to_send);
@@ -335,6 +357,9 @@ Widget create_provider_settings_tab(Widget parent, const char *prefix,
                                     int tab_index);
 void create_general_tab(Widget parent);
 void settings_disable_history_limit_toggle_cb(Widget, XtPointer, XtPointer);
+void setup_menus(Widget menu_bar);
+void setup_conversation_area(Widget parent);
+void setup_input_area(Widget parent);
 void setup_ui(void);
 
 
@@ -409,7 +434,7 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
                      // For performance, we don't re-render on every token in the new widget mode
                      // Instead we could update the last widget, but for now let's just batch
                  } else {
-                     strcpy(batch_buffer + batch_len, msg.data);
+                     snprintf(batch_buffer + batch_len, sizeof(batch_buffer) - batch_len, "%s", msg.data);
                      batch_len += token_len;
                  }
              } else {
@@ -459,7 +484,10 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
                             add_message_to_history(DP_ROLE_ASSISTANT, "", NULL, NULL);
                         }
                         
-                        reset_assistant_buffer();
+                        // Inline reset: we already hold assistant_buffer_mutex (non-recursive),
+                        // so calling reset_assistant_buffer() here would self-deadlock.
+                        if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
+                        current_assistant_response_len = 0;
                         pthread_mutex_unlock(&assistant_buffer_mutex);
                         
                         assistant_is_replying = false; prefix_already_added_for_current_reply = false;
@@ -622,7 +650,8 @@ void start_llm_request() {
     } else {
          snprintf(display_msg_text_part, sizeof(display_msg_text_part), "%s: ", USER_NICKNAME);
     }
-    char full_display_msg[DISPLAY_MSG_BUF_SIZE]; strcpy(full_display_msg, display_msg_text_part);
+    char full_display_msg[DISPLAY_MSG_BUF_SIZE];
+    snprintf(full_display_msg, sizeof(full_display_msg), "%s", display_msg_text_part);
     if (attached_image_base64_data) {
         char path_copy[PATH_MAX]; strncpy(path_copy, attached_image_path, PATH_MAX); path_copy[PATH_MAX-1] = '\0';
         snprintf(full_display_msg, sizeof(full_display_msg), "%s [Image Attached: %s]\n", display_msg_text_part, basename(path_copy));
@@ -666,22 +695,21 @@ void start_llm_request_internal(bool from_tool_call) {
     thread_data->config.stream = true;
 
     char temp_filename[PATH_MAX];
-    strcpy(temp_filename, "/tmp/motifgpt_hist_XXXXXX");
+    snprintf(temp_filename, sizeof(temp_filename), "%s", "/tmp/motifgpt_hist_XXXXXX");
     int fd = mkstemp(temp_filename);
     if (fd != -1) {
-        close(fd);
-        fprintf(stderr, "DEBUG: UI: Serializing history to %s...\n", temp_filename);
         pthread_mutex_lock(&history_mutex);
-        int ser_ret = dp_serialize_messages_to_file(chat_history, chat_history_count, temp_filename);
+        int ser_ret = dp_serialize_messages_to_fd(chat_history, chat_history_count, fd);
         pthread_mutex_unlock(&history_mutex);
         if (ser_ret == 0) {
+             close(fd);
              strncpy(thread_data->temp_history_filename, temp_filename, PATH_MAX - 1);
              thread_data->temp_history_filename[PATH_MAX - 1] = '\0';
              thread_data->config.messages = NULL; 
              thread_data->config.num_messages = 0;
         } else {
-             fprintf(stderr, "ERROR: UI: dp_serialize_messages_to_file failed\n");
-             perror("dp_serialize_messages_to_file");
+             perror("dp_serialize_messages_to_fd");
+             close(fd);
              unlink(temp_filename);
              free(thread_data);
              show_error_dialog("Failed to serialize chat history for thread.");
@@ -1110,8 +1138,8 @@ void file_selection_open_ok_callback(Widget w, XtPointer client_data, XtPointer 
     dp_message_t* loaded_messages = NULL;
     size_t num_loaded = 0;
     if (dp_deserialize_messages_from_file(filename, &loaded_messages, &num_loaded) == 0) {
+        free_chat_history(); // Clear existing history (takes history_mutex itself)
         pthread_mutex_lock(&history_mutex);
-        free_chat_history(); // Clear existing history
         chat_history = loaded_messages;
         chat_history_count = num_loaded;
         chat_history_capacity = num_loaded; // Set capacity to what was loaded
@@ -1133,16 +1161,22 @@ void file_selection_save_as_ok_callback(Widget w, XtPointer client_data, XtPoint
     XmStringGetLtoR(cbs->value, XmFONTLIST_DEFAULT_TAG, &filename);
     if (!filename || strlen(filename) == 0) { if(filename) XtFree(filename); return; }
 
-    pthread_mutex_lock(&history_mutex);
-    int ser_ret = dp_serialize_messages_to_file(chat_history, chat_history_count, filename);
-    pthread_mutex_unlock(&history_mutex);
-    if (ser_ret == 0) {
-        char success_msg[PATH_MAX + 50];
-        snprintf(success_msg, sizeof(success_msg), "\n--- Conversation Saved to: %s ---\n", basename(filename));
-        add_message_to_history(DP_ROLE_SYSTEM, success_msg, NULL, NULL);
-        render_all_history();
+    int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd != -1) {
+        pthread_mutex_lock(&history_mutex);
+        int ser_ret = dp_serialize_messages_to_fd(chat_history, chat_history_count, fd);
+        pthread_mutex_unlock(&history_mutex);
+        close(fd);
+        if (ser_ret == 0) {
+            char success_msg[PATH_MAX + 50];
+            snprintf(success_msg, sizeof(success_msg), "\n--- Conversation Saved to: %s ---\n", basename(filename));
+            add_message_to_history(DP_ROLE_SYSTEM, success_msg, NULL, NULL);
+            render_all_history();
+        } else {
+            show_error_dialog("Failed to save conversation to file.");
+        }
     } else {
-        show_error_dialog("Failed to save conversation to file.");
+        show_error_dialog("Failed to open file for saving.");
     }
 
     if(filename) XtFree(filename);
@@ -1897,21 +1931,10 @@ void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     XtPopup(settings_shell, XtGrabNone);
 }
 
-void setup_ui(void) {
-    Widget main_window, menu_bar, main_form;
-    Widget chat_area_paned, input_form, bottom_buttons_form, open_chat_button, save_chat_as_button, file_sep_open;
-    Widget file_menu, file_cascade, quit_button_widget, clear_chat_button, settings_button, file_sep_exit;
-    Widget edit_menu, edit_cascade;
-    Widget cut_button, copy_button, paste_button, select_all_button, edit_sep;
+void setup_menus(Widget menu_bar) {
+    Widget file_menu, file_cascade, open_chat_button, save_chat_as_button, file_sep_open, settings_button, clear_chat_button, file_sep_exit, quit_button_widget;
+    Widget edit_menu, edit_cascade, cut_button, copy_button, paste_button, edit_sep, select_all_button;
     XmString acc_text_ctrl_q, acc_text_ctrl_o, acc_text_ctrl_x, acc_text_ctrl_c, acc_text_ctrl_v, acc_text_ctrl_a;
-
-    Widget temp_tf = XmCreateTextField(app_shell, "tempTf", NULL, 0);
-    XtVaGetValues(temp_tf, XmNforeground, &normal_fg_color, NULL);
-    XtDestroyWidget(temp_tf);
-
-
-    main_window = XmCreateMainWindow(app_shell, "mainWindow", NULL, 0); XtManageChild(main_window);
-    menu_bar = XmCreateMenuBar(main_window, "menuBar", NULL, 0); XtManageChild(menu_bar);
 
     file_menu = XmCreatePulldownMenu(menu_bar, "fileMenu", NULL, 0);
     file_cascade = XtVaCreateManagedWidget("File", xmCascadeButtonWidgetClass, menu_bar, XmNsubMenuId, file_menu, XmNmnemonic, XK_F, NULL);
@@ -1945,26 +1968,12 @@ void setup_ui(void) {
     acc_text_ctrl_a = XmStringCreateLocalized("Ctrl+A");
     select_all_button = XtVaCreateManagedWidget("Select All", xmPushButtonWidgetClass, edit_menu, XmNmnemonic, XK_A, XmNaccelerator, "Ctrl<Key>a", XmNacceleratorText, acc_text_ctrl_a, NULL);
     XmStringFree(acc_text_ctrl_a); XtAddCallback(select_all_button, XmNactivateCallback, select_all_callback, NULL);
+}
 
-    main_form = XtVaCreateWidget("mainForm", xmFormWidgetClass, main_window,
-                                 XmNwidth, UI_WINDOW_MIN_W, XmNheight, UI_WINDOW_MIN_H,
-                                 XmNmarginWidth, UI_MARGIN, XmNmarginHeight, UI_MARGIN,
-                                 XmNhorizontalSpacing, UI_SPACING, XmNverticalSpacing, UI_SPACING,
-                                 NULL);
-    XtManageChild(main_form);
-
-    chat_area_paned = XtVaCreateManagedWidget("chatAreaPaned", xmPanedWindowWidgetClass, main_form,
-                                              XmNtopAttachment, XmATTACH_FORM,
-                                              XmNbottomAttachment, XmATTACH_FORM,
-                                              XmNleftAttachment, XmATTACH_FORM,
-                                              XmNrightAttachment, XmATTACH_FORM,
-                                              XmNsashWidth, 10, XmNsashHeight, 10,
-                                              XmNspacing, UI_SPACING,
-                                              NULL);
-
-    Widget scrolled_conv_win = XmCreateScrolledWindow(chat_area_paned, "scrolledConvWin", NULL, 0);
+void setup_conversation_area(Widget parent) {
+    Widget scrolled_conv_win = XmCreateScrolledWindow(parent, "scrolledConvWin", NULL, 0);
     XtVaSetValues(scrolled_conv_win, XmNpaneMinimum, 150, XmNpaneMaximum, 1000, XmNscrollingPolicy, XmAUTOMATIC, NULL);
-    
+
     conversation_container = XtVaCreateManagedWidget("conversationContainer", xmRowColumnWidgetClass, scrolled_conv_win,
                                                      XmNorientation, XmVERTICAL,
                                                      XmNpacking, XmPACK_TIGHT,
@@ -1973,8 +1982,12 @@ void setup_ui(void) {
                                                      XmNmarginHeight, UI_SPACING,
                                                      NULL);
     XtManageChild(scrolled_conv_win);
+}
 
-    input_form = XtVaCreateWidget("inputForm", xmFormWidgetClass, chat_area_paned,
+void setup_input_area(Widget parent) {
+    Widget input_form, bottom_buttons_form;
+
+    input_form = XtVaCreateWidget("inputForm", xmFormWidgetClass, parent,
                                   XmNpaneMinimum, 120, XmNpaneMaximum, 300,
                                   XmNhorizontalSpacing, UI_SPACING,
                                   XmNverticalSpacing, UI_SPACING,
@@ -2031,6 +2044,38 @@ void setup_ui(void) {
     XtAddEventHandler(input_text, KeyPressMask, True, app_text_key_press_handler, NULL);
     XtAddCallback(input_text, XmNfocusCallback, focus_callback, NULL);
     XtAddEventHandler(input_text, ButtonPressMask, False, popup_handler, NULL);
+}
+
+void setup_ui(void) {
+    Widget main_window, menu_bar, main_form, chat_area_paned;
+
+    Widget temp_tf = XmCreateTextField(app_shell, "tempTf", NULL, 0);
+    XtVaGetValues(temp_tf, XmNforeground, &normal_fg_color, NULL);
+    XtDestroyWidget(temp_tf);
+
+    main_window = XmCreateMainWindow(app_shell, "mainWindow", NULL, 0); XtManageChild(main_window);
+    menu_bar = XmCreateMenuBar(main_window, "menuBar", NULL, 0); XtManageChild(menu_bar);
+
+    setup_menus(menu_bar);
+
+    main_form = XtVaCreateWidget("mainForm", xmFormWidgetClass, main_window,
+                                 XmNwidth, UI_WINDOW_MIN_W, XmNheight, UI_WINDOW_MIN_H,
+                                 XmNmarginWidth, UI_MARGIN, XmNmarginHeight, UI_MARGIN,
+                                 XmNhorizontalSpacing, UI_SPACING, XmNverticalSpacing, UI_SPACING,
+                                 NULL);
+    XtManageChild(main_form);
+
+    chat_area_paned = XtVaCreateManagedWidget("chatAreaPaned", xmPanedWindowWidgetClass, main_form,
+                                              XmNtopAttachment, XmATTACH_FORM,
+                                              XmNbottomAttachment, XmATTACH_FORM,
+                                              XmNleftAttachment, XmATTACH_FORM,
+                                              XmNrightAttachment, XmATTACH_FORM,
+                                              XmNsashWidth, 10, XmNsashHeight, 10,
+                                              XmNspacing, UI_SPACING,
+                                              NULL);
+
+    setup_conversation_area(chat_area_paned);
+    setup_input_area(chat_area_paned);
 
     popup_menu = create_text_popup_menu(main_window);
 
