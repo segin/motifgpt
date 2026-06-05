@@ -14,11 +14,11 @@ plugins/plugin_filereader.so: plugins/plugin_filereader.c motifgpt_plugin.h
 
 plugins/plugin_weather.so: plugins/plugin_weather.c motifgpt_plugin.h
 	mkdir -p plugins
-	$(CC) $(CFLAGS) -fPIC -shared -o $@ plugins/plugin_weather.c @LIBCJSON_LIBS@ -I.
+	$(CC) $(CFLAGS) -fPIC -shared -o $@ plugins/plugin_weather.c @LIBCJSON_LIBS@ @LIBCURL_LIBS@ -I.
 
 plugins/plugin_stock.so: plugins/plugin_stock.c motifgpt_plugin.h
 	mkdir -p plugins
-	$(CC) $(CFLAGS) -fPIC -shared -o $@ plugins/plugin_stock.c @LIBCJSON_LIBS@ -I.
+	$(CC) $(CFLAGS) -fPIC -shared -o $@ plugins/plugin_stock.c @LIBCJSON_LIBS@ @LIBCURL_LIBS@ -I.
 
 clean-local:
 	rm -f plugins/*.so

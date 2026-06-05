@@ -20,6 +20,7 @@
 #include <Xm/List.h>
 #include <Xm/Frame.h>
 #include <Xm/FileSB.h>
+#include <Xm/ScrollBar.h>
 
 #include <X11/keysym.h>
 #include <X11/Xlib.h>
@@ -87,18 +88,21 @@
 #define VAL_TRUE "true"
 #define VAL_FALSE "false"
 
-// UI Spacing
-#define UI_SPACING_SMALL 2
-#define UI_SPACING_MEDIUM 5
-#define UI_SPACING_LARGE 10
-#define UI_SPACING_XLARGE 15
+// UI Spacing (8px Grid System)
+#define UI_GRID_BASE    8
+#define UI_MARGIN       16  // 2 * Base: Standard outer margin
+#define UI_SPACING      8   // 1 * Base: Standard inner spacing
+#define UI_GROUP_SPACE  24  // 3 * Base: Space between logical groups
+#define UI_WINDOW_MIN_W 640
+#define UI_WINDOW_MIN_H 480
 
 // Buffer sizes
 #define API_KEY_BUF_SIZE 256
 #define MODEL_ID_BUF_SIZE 128
 #define API_URL_BUF_SIZE 256
-#define SYSTEM_PROMPT_BUF_SIZE 2048
-#define THREAD_SYSTEM_PROMPT_BUF_SIZE (SYSTEM_PROMPT_BUF_SIZE * 2)
+#define SYSTEM_PROMPT_BUF_SIZE 4096
+#define THREAD_SYSTEM_PROMPT_BUF_SIZE 8192
+#define MODEL_NAME_BUF_SIZE 128
 #define DISPLAY_MSG_BUF_SIZE (2048 + PATH_MAX)
 #define DEFAULT_MAX_TOKENS 2048
 
@@ -108,11 +112,28 @@
 #include <dirent.h>
 #include <cjson/cJSON.h>
 #include "motifgpt_plugin.h"
+#include "motifgpt_chat.h"
+#include "buffer_utils.h"
 
-// Global registry for tools
+// Prototypes needed early
+void render_all_history();
+void start_llm_request_internal(bool from_tool_call);
+void add_message_to_history(dp_message_role_t role, const char *text, const char *image_mime, const char *image_base64);
+
+
+// Global registry for tools and plugins
 #define MAX_TOOLS 64
+#define MAX_PLUGINS 16
+
+typedef struct {
+    void* handle;
+    motifgpt_plugin_t* info;
+} loaded_plugin_t;
+
 motifgpt_tool_t* registry_tools[MAX_TOOLS];
 int num_registry_tools = 0;
+loaded_plugin_t loaded_plugins_list[MAX_PLUGINS];
+int num_loaded_plugins = 0;
 
 void load_plugins(const char* plugin_dir) {
     DIR *dir;
@@ -130,6 +151,11 @@ void load_plugins(const char* plugin_dir) {
                         motifgpt_plugin_t* plugin = init_func();
                         if (plugin) {
                             printf("Loaded plugin: %s\n", plugin->plugin_name);
+                            if (num_loaded_plugins < MAX_PLUGINS) {
+                                loaded_plugins_list[num_loaded_plugins].handle = handle;
+                                loaded_plugins_list[num_loaded_plugins].info = plugin;
+                                num_loaded_plugins++;
+                            }
                             for (int i = 0; i < plugin->num_tools; i++) {
                                 if (num_registry_tools < MAX_TOOLS) {
                                     registry_tools[num_registry_tools++] = &plugin->tools[i];
@@ -138,6 +164,7 @@ void load_plugins(const char* plugin_dir) {
                         }
                     } else {
                         fprintf(stderr, "Failed to find motifgpt_plugin_init in %s: %s\n", path, dlerror());
+                        dlclose(handle);
                     }
                 } else {
                     fprintf(stderr, "Failed to load %s: %s\n", path, dlerror());
@@ -153,7 +180,7 @@ void load_plugins(const char* plugin_dir) {
 void append_tools_to_system_prompt(char* buffer, size_t buffer_size) {
     if (num_registry_tools == 0) return;
     
-    const char* header = "\n\nYou have access to the following tools. To call a tool, you MUST output a JSON block inside a <tool_call> tag. Wait for the user to provide the tool result in a <tool_result> tag. DO NOT output anything else when calling a tool.\nFormat:\n<tool_call>{\"name\": \"tool_name\", \"args\": {\"arg1\": \"val1\"}}</tool_call>\n\nAvailable tools:\n";
+    const char* header = "\n\nYou have access to the following tools. To call a tool, you MUST output a JSON block inside a <tool_call> tag. The system will provide the result in a message with the TOOL role. DO NOT output anything else when calling a tool.\nFormat:\n<tool_call>{\"name\": \"tool_name\", \"args\": {\"arg1\": \"val1\"}}</tool_call>\n\nAvailable tools:\n";
     strncat(buffer, header, buffer_size - strlen(buffer) - 1);
     
     for (int i = 0; i < num_registry_tools; i++) {
@@ -165,55 +192,76 @@ void append_tools_to_system_prompt(char* buffer, size_t buffer_size) {
 
 void start_llm_request_internal(bool from_tool_call); // forward declaration
 
-void execute_tool_call_and_continue(const char* tool_call_json) {
-    cJSON* json = cJSON_Parse(tool_call_json);
+typedef struct {
+    char* tool_call_json;
+} tool_thread_data_t;
+
+void *perform_tool_call_thread(void *arg) {
+    tool_thread_data_t *data = (tool_thread_data_t *)arg;
+    fprintf(stderr, "DEBUG: ToolThread %lu: Executing tool call: %s\n", (unsigned long)pthread_self(), data->tool_call_json);
+    
+    cJSON* json = cJSON_Parse(data->tool_call_json);
+    char* result_to_send = NULL;
+
     if (!json) {
-        add_message_to_history(DP_ROLE_USER, "<tool_result>{\"error\": \"Invalid JSON\"}</tool_result>", NULL, NULL);
-        start_llm_request_internal(true);
-        return;
-    }
-    
-    cJSON* name_node = cJSON_GetObjectItemCaseSensitive(json, "name");
-    cJSON* args_node = cJSON_GetObjectItemCaseSensitive(json, "args");
-    
-    if (!cJSON_IsString(name_node)) {
-        add_message_to_history(DP_ROLE_USER, "<tool_result>{\"error\": \"Missing tool name\"}</tool_result>", NULL, NULL);
-        cJSON_Delete(json);
-        start_llm_request_internal(true);
-        return;
-    }
-    
-    const char* tool_name = name_node->valuestring;
-    char* args_str = args_node ? cJSON_PrintUnformatted(args_node) : strdup("{}");
-    
-    char* result = NULL;
-    for (int i = 0; i < num_registry_tools; i++) {
-        if (strcmp(registry_tools[i]->name, tool_name) == 0) {
-            result = registry_tools[i]->execute(args_str);
-            break;
-        }
-    }
-    
-    char result_msg[8192];
-    if (result) {
-        snprintf(result_msg, sizeof(result_msg), "<tool_result>%s</tool_result>", result);
-        free(result);
+        result_to_send = strdup("{\"error\": \"Invalid JSON in tool call\"}");
     } else {
-        snprintf(result_msg, sizeof(result_msg), "<tool_result>{\"error\": \"Unknown tool\"}</tool_result>");
+        cJSON* name_node = cJSON_GetObjectItemCaseSensitive(json, "name");
+        cJSON* args_node = cJSON_GetObjectItemCaseSensitive(json, "args");
+        
+        if (!cJSON_IsString(name_node)) {
+            result_to_send = strdup("{\"error\": \"Missing tool name\"}");
+        } else {
+            const char* tool_name = name_node->valuestring;
+            char* args_str = args_node ? cJSON_PrintUnformatted(args_node) : strdup("{}");
+            
+            for (int i = 0; i < num_registry_tools; i++) {
+                if (strcmp(registry_tools[i]->name, tool_name) == 0) {
+                    result_to_send = registry_tools[i]->execute(args_str);
+                    break;
+                }
+            }
+            if (!result_to_send) result_to_send = strdup("{\"error\": \"Unknown tool\"}");
+            free(args_str);
+        }
+        cJSON_Delete(json);
     }
+
+    // We can't send more than 512 bytes in a single pipe message comfortably if it's large.
+    // However, the tool result can be large. 
+    // For now, let's just add it to history here (with mutex) and send a signal.
+    // Wait, adding to history might trigger UI render if we aren't careful.
+    // Let's add to history here and just signal the UI to render and continue.
     
-    free(args_str);
-    cJSON_Delete(json);
+    pthread_mutex_lock(&history_mutex);
+    add_message_to_history(DP_ROLE_TOOL, result_to_send, NULL, NULL);
+    pthread_mutex_unlock(&history_mutex);
     
-    add_message_to_history(DP_ROLE_USER, result_msg, NULL, NULL);
-    append_to_conversation(result_msg);
-    append_to_conversation("\n");
-    start_llm_request_internal(true);
+    write_pipe_message(PIPE_MSG_TOOL_RESULT, NULL);
+    
+    free(result_to_send);
+    free(data->tool_call_json);
+    free(data);
+    pthread_detach(pthread_self());
+    return NULL;
+}
+
+void execute_tool_call_and_continue(const char* tool_call_json) {
+    tool_thread_data_t *data = malloc(sizeof(tool_thread_data_t));
+    data->tool_call_json = strdup(tool_call_json);
+    
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, perform_tool_call_thread, data) != 0) {
+        perror("pthread_create tool_call");
+        free(data->tool_call_json);
+        free(data);
+        show_error_dialog("Failed to start tool execution thread.");
+    }
 }
 
 // Globals
 Widget app_shell;
-Widget conversation_text;
+Widget conversation_container; // The RowColumn inside the scrolled window
 Widget input_text;
 Widget send_button;
 Widget attach_image_button;
@@ -222,7 +270,7 @@ Widget popup_menu = NULL;
 Widget popup_cut_item, popup_paste_item, popup_copy_item, popup_select_all_item;
 
 Widget settings_shell = NULL;
-Widget settings_general_tab_content, settings_gemini_tab_content, settings_openai_tab_content, settings_anthropic_tab_content;
+Widget settings_general_tab_content, settings_gemini_tab_content, settings_openai_tab_content, settings_anthropic_tab_content, settings_plugins_tab_content;
 Widget settings_current_tab_content = NULL;
 Widget provider_gemini_rb, provider_openai_rb, provider_anthropic_rb;
 Widget gemini_api_key_text, gemini_model_text, gemini_model_list;
@@ -264,29 +312,7 @@ typedef struct { dp_provider_type_t provider; char api_key_for_list[API_KEY_BUF_
 // Function Prototypes
 void send_message_callback(Widget, XtPointer, XtPointer);
 int stream_handler(const char*, void*, bool, const char*);
-void handle_pipe_input(XtPointer, int*, XtInputId*);
-void quit_callback(Widget, XtPointer, XtPointer);
 void show_error_dialog(const char*);
-static void input_text_key_press_handler(Widget, XtPointer, XEvent*, Boolean*);
-static void app_text_key_press_handler(Widget, XtPointer, XEvent*, Boolean*);
-static void focus_callback(Widget, XtPointer, XtPointer);
-static void settings_text_field_focus_in_cb(Widget, XtPointer, XtPointer);
-static void settings_text_field_focus_out_cb(Widget, XtPointer, XtPointer);
-static int ends_with_ignore_case(const char *str, const char *suffix);
-void clear_chat_callback(Widget, XtPointer, XtPointer);
-void *perform_llm_request_thread(void*);
-void initialize_dp_context();
-void load_settings();
-void save_settings();
-void attach_image_callback(Widget, XtPointer, XtPointer);
-void file_selection_ok_callback(Widget, XtPointer, XtPointer);
-void open_chat_callback(Widget, XtPointer, XtPointer);
-void save_chat_as_callback(Widget, XtPointer, XtPointer);
-void file_selection_open_ok_callback(Widget, XtPointer, XtPointer);
-void file_selection_save_as_ok_callback(Widget, XtPointer, XtPointer);
-void render_all_history();
-void append_to_conversation(const char* text);
-void append_to_conversation_ex(const char* text, Boolean scroll);
 unsigned char* read_file_to_buffer(const char*, size_t*);
 char* base64_encode(const unsigned char*, size_t);
 static void popup_handler(Widget, XtPointer, XEvent*, Boolean*);
@@ -312,17 +338,41 @@ void settings_disable_history_limit_toggle_cb(Widget, XtPointer, XtPointer);
 void setup_ui(void);
 
 
-void append_to_conversation_ex(const char* text, Boolean scroll) {
-    if (!conversation_text || !XtIsManaged(conversation_text)) return;
-    XmTextPosition pos = XmTextGetLastPosition(conversation_text);
-    XmTextInsert(conversation_text, pos, (char*)text);
-    if (scroll) {
-        XmTextShowPosition(conversation_text, XmTextGetLastPosition(conversation_text));
+static XtIntervalId thinking_timer_id = 0;
+static int thinking_step = 0;
+static bool model_is_thinking = false;
+static bool model_is_generating = false;
+
+void update_thinking_indicator(XtPointer client_data, XtIntervalId *id) {
+    if (!model_is_thinking && !model_is_generating) {
+        thinking_timer_id = 0;
+        return;
     }
+
+    const char* label = model_is_generating ? "Generating" : "Thinking";
+    char indicator[32];
+    int dots = (thinking_step % 4);
+    snprintf(indicator, sizeof(indicator), "%s", label);
+    for(int i=0; i < dots; i++) strncat(indicator, ".", sizeof(indicator) - strlen(indicator) - 1);
+    for(int i=dots; i < 3; i++) strncat(indicator, " ", sizeof(indicator) - strlen(indicator) - 1);
+    
+    // We need a way to show this without corrupting the conversation.
+    // For now, let's just use stderr or a status label if we had one.
+    // Given the Motif structure, we'll append/replace a specific line if possible,
+    // but simpler is to update the window title or a dedicated label.
+    // Let's update the main window title for now as a simple busy indicator.
+    char title[128];
+    snprintf(title, sizeof(title), "MotifGPT - %s%s", label, dots == 1 ? "." : (dots == 2 ? ".." : (dots == 3 ? "..." : "")));
+    XtVaSetValues(app_shell, XmNtitle, title, NULL);
+
+    thinking_step++;
+    thinking_timer_id = XtAppAddTimeOut(XtWidgetToApplicationContext(app_shell), 500, update_thinking_indicator, NULL);
 }
 
-void append_to_conversation(const char* text) {
-    append_to_conversation_ex(text, True);
+void stop_thinking_indicator() {
+    model_is_thinking = false;
+    model_is_generating = false;
+    XtVaSetValues(app_shell, XmNtitle, "MotifGPT", NULL);
 }
 
 void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
@@ -341,54 +391,56 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
 
         if (nbytes == sizeof(pipe_message_t)) {
              if (msg.type == PIPE_MSG_TOKEN) {
+                 if (model_is_thinking) {
+                     model_is_thinking = false;
+                     model_is_generating = true;
+                 }
                  if (assistant_is_replying && !prefix_already_added_for_current_reply) {
-                     size_t prefix_len = strlen(current_assistant_prefix);
-                     if (batch_len + prefix_len > BATCH_CAPACITY) {
-                         if (batch_len > 0) {
-                             append_to_conversation(batch_buffer);
-                             batch_buffer[0] = '\0';
-                             batch_len = 0;
-                         }
-                     }
-                     if (batch_len + prefix_len <= BATCH_CAPACITY) {
-                         strcpy(batch_buffer + batch_len, current_assistant_prefix);
-                         batch_len += prefix_len;
-                     } else {
-                         append_to_conversation(current_assistant_prefix);
-                     }
                      prefix_already_added_for_current_reply = true;
                  }
 
                  size_t token_len = strlen(msg.data);
                  if (batch_len + token_len > BATCH_CAPACITY) {
-                     append_to_conversation(batch_buffer);
                      batch_buffer[0] = '\0';
                      batch_len = 0;
                  }
 
                  if (token_len > BATCH_CAPACITY) {
-                     append_to_conversation(msg.data);
+                     // For performance, we don't re-render on every token in the new widget mode
+                     // Instead we could update the last widget, but for now let's just batch
                  } else {
                      strcpy(batch_buffer + batch_len, msg.data);
                      batch_len += token_len;
                  }
              } else {
                  if (batch_len > 0) {
-                     append_to_conversation(batch_buffer);
+                     // batch_buffer has some text, but we'll let render_all_history handle the display
+                     // after adding to actual history objects.
                      batch_buffer[0] = '\0';
                      batch_len = 0;
                  }
 
+                 fprintf(stderr, "DEBUG: UI: Received pipe message type %d\n", msg.type);
+
                  switch (msg.type) {
-                     case PIPE_MSG_STREAM_END:
-                        if (assistant_is_replying && !prefix_already_added_for_current_reply && current_assistant_response_len == 0) {
-                            append_to_conversation(current_assistant_prefix);
+                     case PIPE_MSG_THINKING:
+                        model_is_thinking = true;
+                        model_is_generating = false;
+                        thinking_step = 0;
+                        if (thinking_timer_id == 0) {
+                            thinking_timer_id = XtAppAddTimeOut(XtWidgetToApplicationContext(app_shell), 100, update_thinking_indicator, NULL);
                         }
-                        append_to_conversation("\n");
+                        break;
+                     case PIPE_MSG_STREAM_END:
+                        fprintf(stderr, "DEBUG: UI: PIPE_MSG_STREAM_END\n");
+                        stop_thinking_indicator();
                         
                         bool is_tool_call = false;
-                        char tool_call_json[8192] = "";
+                        char *tool_call_json = NULL;
+                        
+                        pthread_mutex_lock(&assistant_buffer_mutex);
                         if (current_assistant_response_buffer && current_assistant_response_len > 0) {
+                            fprintf(stderr, "DEBUG: UI: Response len: %zu\n", current_assistant_response_len);
                             add_message_to_history(DP_ROLE_ASSISTANT, current_assistant_response_buffer, NULL, NULL);
                             
                             const char* tc_start = strstr(current_assistant_response_buffer, "<tool_call>");
@@ -396,7 +448,9 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
                             if (tc_start && tc_end && tc_end > tc_start) {
                                 is_tool_call = true;
                                 size_t tc_len = tc_end - tc_start - 11;
-                                if (tc_len < sizeof(tool_call_json)) {
+                                fprintf(stderr, "DEBUG: UI: Detected tool call (len %zu)\n", tc_len);
+                                tool_call_json = malloc(tc_len + 1);
+                                if (tool_call_json) {
                                     strncpy(tool_call_json, tc_start + 11, tc_len);
                                     tool_call_json[tc_len] = '\0';
                                 }
@@ -404,17 +458,29 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
                         } else if (assistant_is_replying && current_assistant_response_len == 0) {
                             add_message_to_history(DP_ROLE_ASSISTANT, "", NULL, NULL);
                         }
-                        if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
-                        current_assistant_response_len = 0;
-                        assistant_is_replying = false; prefix_already_added_for_current_reply = false;
                         
-                        if (is_tool_call) {
+                        reset_assistant_buffer();
+                        pthread_mutex_unlock(&assistant_buffer_mutex);
+                        
+                        assistant_is_replying = false; prefix_already_added_for_current_reply = false;
+                        render_all_history();
+
+                        if (is_tool_call && tool_call_json) {
                             execute_tool_call_and_continue(tool_call_json);
+                            free(tool_call_json);
                         }
                         break;
                      case PIPE_MSG_ERROR:
-                        show_error_dialog(msg.data); append_to_conversation(msg.data); append_to_conversation("\n");
+                        fprintf(stderr, "DEBUG: UI: PIPE_MSG_ERROR: %s\n", msg.data);
+                        stop_thinking_indicator();
+                        show_error_dialog(msg.data);
+                        render_all_history();
                         assistant_is_replying = false; prefix_already_added_for_current_reply = false;
+                        break;
+                     case PIPE_MSG_TOOL_RESULT:
+                        fprintf(stderr, "DEBUG: UI: PIPE_MSG_TOOL_RESULT received\n");
+                        render_all_history();
+                        start_llm_request_internal(true);
                         break;
                      case PIPE_MSG_MODEL_LIST_ITEM:
                         if (settings_shell && XtIsManaged(settings_shell)) {
@@ -451,25 +517,28 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
              break;
         }
     }
-
-    if (batch_len > 0) {
-        append_to_conversation(batch_buffer);
-    }
 }
 
 void *perform_llm_request_thread(void *arg) {
     llm_thread_data_t *thread_data = (llm_thread_data_t *)arg;
     dp_response_t response_status = {0};
 
+    fprintf(stderr, "DEBUG: Thread %lu: Starting perform_llm_request_thread...\n", (unsigned long)pthread_self());
+
+    write_pipe_message(PIPE_MSG_THINKING, NULL);
+
     // Deserialize chat history from temp file
     if (strlen(thread_data->temp_history_filename) > 0) {
         dp_message_t *loaded_messages = NULL;
         size_t num_loaded = 0;
+        fprintf(stderr, "DEBUG: Thread %lu: Deserializing history from %s...\n", (unsigned long)pthread_self(), thread_data->temp_history_filename);
         if (dp_deserialize_messages_from_file(thread_data->temp_history_filename, &loaded_messages, &num_loaded) == 0) {
             thread_data->config.messages = loaded_messages;
             thread_data->config.num_messages = num_loaded;
             unlink(thread_data->temp_history_filename); // Remove file immediately after loading
+            fprintf(stderr, "DEBUG: Thread %lu: Loaded %zu messages.\n", (unsigned long)pthread_self(), num_loaded);
         } else {
+             fprintf(stderr, "ERROR: Thread %lu: Failed to load chat history from %s.\n", (unsigned long)pthread_self(), thread_data->temp_history_filename);
              write_pipe_message(PIPE_MSG_ERROR, "Failed to load chat history for request.");
              unlink(thread_data->temp_history_filename);
              free(thread_data);
@@ -478,7 +547,7 @@ void *perform_llm_request_thread(void *arg) {
         }
     }
 
-    printf("Thread: LLM request with %d messages.\n", (int)thread_data->config.num_messages);
+    fprintf(stderr, "DEBUG: Thread %lu: LLM request with %d messages.\n", (unsigned long)pthread_self(), (int)thread_data->config.num_messages);
 
     // Point the config's system_prompt to the buffer inside the struct
     if (strlen(thread_data->system_prompt_buffer) > 0) {
@@ -487,12 +556,18 @@ void *perform_llm_request_thread(void *arg) {
         thread_data->config.system_prompt = NULL;
     }
 
+    fprintf(stderr, "DEBUG: Thread %lu: Locking dp_mutex...\n", (unsigned long)pthread_self());
     pthread_mutex_lock(&dp_mutex);
     int ret = -1;
     if (dp_ctx) {
+        fprintf(stderr, "DEBUG: Thread %lu: Calling dp_perform_streaming_completion (Model: %s)...\n", (unsigned long)pthread_self(), thread_data->config.model);
         ret = dp_perform_streaming_completion(dp_ctx, &thread_data->config, stream_handler, NULL, &response_status);
+        fprintf(stderr, "DEBUG: Thread %lu: dp_perform_streaming_completion returned %d.\n", (unsigned long)pthread_self(), ret);
+    } else {
+        fprintf(stderr, "ERROR: Thread %lu: dp_ctx is NULL!\n", (unsigned long)pthread_self());
     }
     pthread_mutex_unlock(&dp_mutex);
+    fprintf(stderr, "DEBUG: Thread %lu: Released dp_mutex.\n", (unsigned long)pthread_self());
 
     if (ret != 0) {
         char err_buf[1024];
@@ -502,6 +577,7 @@ void *perform_llm_request_thread(void *arg) {
              snprintf(err_buf, sizeof(err_buf), "LLM Request Failed (Thread) (HTTP %ld): %s",
                  response_status.http_status_code, response_status.error_message ? response_status.error_message : "DP error in thread.");
         }
+        fprintf(stderr, "ERROR: Thread %lu: %s\n", (unsigned long)pthread_self(), err_buf);
         write_pipe_message(PIPE_MSG_ERROR, err_buf);
     }
     dp_free_response_content(&response_status);
@@ -513,6 +589,7 @@ void *perform_llm_request_thread(void *arg) {
     }
 
     free(thread_data);
+    fprintf(stderr, "DEBUG: Thread %lu: perform_llm_request_thread exiting.\n", (unsigned long)pthread_self());
     pthread_detach(pthread_self());
     return NULL;
 }
@@ -552,7 +629,6 @@ void start_llm_request() {
     } else {
         snprintf(full_display_msg, sizeof(full_display_msg), "%s\n", display_msg_text_part);
     }
-    append_to_conversation(full_display_msg);
     add_message_to_history(DP_ROLE_USER, input_string_raw ? input_string_raw : "",
                            attached_image_base64_data ? attached_image_mime_type : NULL,
                            attached_image_base64_data);
@@ -563,13 +639,17 @@ void start_llm_request() {
         attached_image_path[0] = '\0'; attached_image_mime_type[0] = '\0';
     }
 
+    render_all_history();
     start_llm_request_internal(false);
 }
 
 void start_llm_request_internal(bool from_tool_call) {
     llm_thread_data_t *thread_data = malloc(sizeof(llm_thread_data_t));
     if (!thread_data) { perror("malloc llm_thread_data"); return; }
+    memset(thread_data, 0, sizeof(llm_thread_data_t));
     thread_data->system_prompt_buffer[0] = '\0';
+
+    fprintf(stderr, "DEBUG: UI: start_llm_request_internal(from_tool_call=%d)\n", from_tool_call);
 
     if (current_api_provider == DP_PROVIDER_GOOGLE_GEMINI) {
         thread_data->config.model = current_gemini_model;
@@ -590,12 +670,17 @@ void start_llm_request_internal(bool from_tool_call) {
     int fd = mkstemp(temp_filename);
     if (fd != -1) {
         close(fd);
-        if (dp_serialize_messages_to_file(chat_history, chat_history_count, temp_filename) == 0) {
+        fprintf(stderr, "DEBUG: UI: Serializing history to %s...\n", temp_filename);
+        pthread_mutex_lock(&history_mutex);
+        int ser_ret = dp_serialize_messages_to_file(chat_history, chat_history_count, temp_filename);
+        pthread_mutex_unlock(&history_mutex);
+        if (ser_ret == 0) {
              strncpy(thread_data->temp_history_filename, temp_filename, PATH_MAX - 1);
              thread_data->temp_history_filename[PATH_MAX - 1] = '\0';
              thread_data->config.messages = NULL; 
              thread_data->config.num_messages = 0;
         } else {
+             fprintf(stderr, "ERROR: UI: dp_serialize_messages_to_file failed\n");
              perror("dp_serialize_messages_to_file");
              unlink(temp_filename);
              free(thread_data);
@@ -615,8 +700,10 @@ void start_llm_request_internal(bool from_tool_call) {
         snprintf(current_assistant_prefix, sizeof(current_assistant_prefix), "%s (tool result): ", USER_NICKNAME);
     }
     
+    fprintf(stderr, "DEBUG: UI: Creating LLM request thread...\n");
     pthread_t tid;
     if (pthread_create(&tid, NULL, perform_llm_request_thread, thread_data) != 0) {
+        fprintf(stderr, "ERROR: UI: pthread_create failed\n");
         perror("pthread_create llm_request");
         if (strlen(thread_data->temp_history_filename) > 0) unlink(thread_data->temp_history_filename);
         free(thread_data);
@@ -641,11 +728,10 @@ void quit_callback(Widget w, XtPointer client_data, XtPointer call_data) {
 }
 
 void clear_chat_callback(Widget w, XtPointer client_data, XtPointer call_data) {
-    XmTextSetString(conversation_text, ""); free_chat_history();
-    append_to_conversation("Chat cleared. Welcome to MotifGPT!\n");
+    free_chat_history();
     assistant_is_replying = false; prefix_already_added_for_current_reply = false;
-    if (current_assistant_response_buffer) current_assistant_response_buffer[0] = '\0';
-    current_assistant_response_len = 0;
+    reset_assistant_buffer();
+    render_all_history();
 }
 
 void show_error_dialog(const char* message) {
@@ -999,7 +1085,8 @@ void file_selection_ok_callback(Widget w, XtPointer client_data, XtPointer call_
     char status_msg[PATH_MAX + 50];
     char path_copy[PATH_MAX]; strncpy(path_copy, attached_image_path, PATH_MAX); path_copy[PATH_MAX-1] = '\0';
     snprintf(status_msg, sizeof(status_msg), "[Image ready: %s]", basename(path_copy));
-    append_to_conversation(status_msg); append_to_conversation("\n");
+    add_message_to_history(DP_ROLE_SYSTEM, status_msg, NULL, NULL);
+    render_all_history();
     XtUnmanageChild(w);
 }
 
@@ -1023,12 +1110,15 @@ void file_selection_open_ok_callback(Widget w, XtPointer client_data, XtPointer 
     dp_message_t* loaded_messages = NULL;
     size_t num_loaded = 0;
     if (dp_deserialize_messages_from_file(filename, &loaded_messages, &num_loaded) == 0) {
+        pthread_mutex_lock(&history_mutex);
         free_chat_history(); // Clear existing history
         chat_history = loaded_messages;
         chat_history_count = num_loaded;
         chat_history_capacity = num_loaded; // Set capacity to what was loaded
+        pthread_mutex_unlock(&history_mutex);
         render_all_history();
-        append_to_conversation("\n--- Conversation Loaded ---\n");
+        add_message_to_history(DP_ROLE_SYSTEM, "Conversation Loaded", NULL, NULL);
+        render_all_history();
     } else {
         show_error_dialog("Failed to load or parse conversation file.");
     }
@@ -1043,10 +1133,14 @@ void file_selection_save_as_ok_callback(Widget w, XtPointer client_data, XtPoint
     XmStringGetLtoR(cbs->value, XmFONTLIST_DEFAULT_TAG, &filename);
     if (!filename || strlen(filename) == 0) { if(filename) XtFree(filename); return; }
 
-    if (dp_serialize_messages_to_file(chat_history, chat_history_count, filename) == 0) {
+    pthread_mutex_lock(&history_mutex);
+    int ser_ret = dp_serialize_messages_to_file(chat_history, chat_history_count, filename);
+    pthread_mutex_unlock(&history_mutex);
+    if (ser_ret == 0) {
         char success_msg[PATH_MAX + 50];
         snprintf(success_msg, sizeof(success_msg), "\n--- Conversation Saved to: %s ---\n", basename(filename));
-        append_to_conversation(success_msg);
+        add_message_to_history(DP_ROLE_SYSTEM, success_msg, NULL, NULL);
+        render_all_history();
     } else {
         show_error_dialog("Failed to save conversation to file.");
     }
@@ -1194,6 +1288,71 @@ void settings_disable_history_limit_toggle_cb(Widget w, XtPointer client_data, X
     XtSetSensitive(history_length_text, !set);
 }
 
+void plugin_config_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    int plugin_idx = (int)(long)client_data;
+    if (plugin_idx >= 0 && plugin_idx < num_loaded_plugins) {
+        if (loaded_plugins_list[plugin_idx].info->show_settings_dialog) {
+            loaded_plugins_list[plugin_idx].info->show_settings_dialog(settings_shell);
+        }
+    }
+}
+
+void create_plugins_tab(Widget parent) {
+    settings_plugins_tab_content = XtVaCreateWidget("pluginsTab", xmFormWidgetClass, parent,
+                                                    XmNmarginWidth, UI_MARGIN, XmNmarginHeight, UI_MARGIN,
+                                                    XmNhorizontalSpacing, UI_SPACING, XmNverticalSpacing, UI_SPACING,
+                                                    NULL);
+
+    Widget header = XtVaCreateManagedWidget("Loaded Plugins:", xmLabelWidgetClass, settings_plugins_tab_content,
+                                            XmNtopAttachment, XmATTACH_FORM,
+                                            XmNleftAttachment, XmATTACH_FORM,
+                                            NULL);
+
+    Widget scrolled_win = XmCreateScrolledWindow(settings_plugins_tab_content, "pluginsScrolledWin", NULL, 0);
+    XtVaSetValues(scrolled_win,
+                  XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, header,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  XmNscrollingPolicy, XmAUTOMATIC,
+                  NULL);
+
+    Widget list_form = XtVaCreateWidget("pluginsListForm", xmFormWidgetClass, scrolled_win,
+                                        XmNverticalSpacing, UI_SPACING,
+                                        NULL);
+
+    Widget last_row = NULL;
+    for (int i = 0; i < num_loaded_plugins; i++) {
+        Widget row = XtVaCreateWidget("pluginRow", xmFormWidgetClass, list_form,
+                                      XmNtopAttachment, last_row ? XmATTACH_WIDGET : XmATTACH_FORM,
+                                      XmNtopWidget, last_row,
+                                      XmNleftAttachment, XmATTACH_FORM,
+                                      XmNrightAttachment, XmATTACH_FORM,
+                                      NULL);
+        
+        Widget name_label = XtVaCreateManagedWidget((char*)loaded_plugins_list[i].info->plugin_name, xmLabelWidgetClass, row,
+                                                    XmNleftAttachment, XmATTACH_FORM,
+                                                    XmNtopAttachment, XmATTACH_FORM,
+                                                    XmNbottomAttachment, XmATTACH_FORM,
+                                                    NULL);
+        
+        if (loaded_plugins_list[i].info->show_settings_dialog) {
+            Widget config_btn = XtVaCreateManagedWidget("Configure...", xmPushButtonWidgetClass, row,
+                                                        XmNrightAttachment, XmATTACH_FORM,
+                                                        XmNtopAttachment, XmATTACH_FORM,
+                                                        XmNbottomAttachment, XmATTACH_FORM,
+                                                        NULL);
+            XtAddCallback(config_btn, XmNactivateCallback, plugin_config_callback, (XtPointer)(long)i);
+        }
+        
+        XtManageChild(row);
+        last_row = row;
+    }
+
+    XtManageChild(list_form);
+    XtManageChild(scrolled_win);
+}
+
 void settings_tab_change_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     long tab_index = (long)client_data;
     if (settings_current_tab_content) XtUnmanageChild(settings_current_tab_content);
@@ -1202,6 +1361,7 @@ void settings_tab_change_callback(Widget w, XtPointer client_data, XtPointer cal
         case 1: settings_current_tab_content = settings_gemini_tab_content; break;
         case 2: settings_current_tab_content = settings_openai_tab_content; break;
         case 3: settings_current_tab_content = settings_anthropic_tab_content; break;
+        case 4: settings_current_tab_content = settings_plugins_tab_content; break;
         default: return;
     }
     if (settings_current_tab_content) XtManageChild(settings_current_tab_content);
@@ -1433,98 +1593,132 @@ static void numeric_verify_cb(Widget w, XtPointer client_data, XtPointer call_da
     }
 }
 
+void retry_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    int history_index = (int)(long)client_data;
+    fprintf(stderr, "DEBUG: UI: Retry triggered for message index %d\n", history_index);
+    
+    pthread_mutex_lock(&history_mutex);
+    if (history_index < chat_history_count) {
+        // Truncate history to this point + 1 (the user message we're retrying)
+        // and remove all subsequent messages
+        int to_remove = chat_history_count - (history_index + 1);
+        if (to_remove > 0) {
+            dp_free_messages(&chat_history[history_index + 1], to_remove);
+            chat_history_count = history_index + 1;
+        }
+    }
+    pthread_mutex_unlock(&history_mutex);
+    
+    render_all_history();
+    start_llm_request_internal(false);
+}
+
+void copy_message_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    char* text = (char*)client_data;
+    if (!text) return;
+    
+    Display* dpy = XtDisplay(app_shell);
+    Atom clipboard = XInternAtom(dpy, "CLIPBOARD", False);
+    XmTextSetString(input_text, text); // Simple way to get it into a buffer Motif likes
+    XmTextSetSelection(input_text, 0, strlen(text), XtLastTimestampProcessed(dpy));
+    XmTextCopy(input_text, XtLastTimestampProcessed(dpy));
+    XmTextSetString(input_text, "");
+}
+
+void add_message_widget(dp_message_role_t role, const char* text, int history_idx) {
+    Widget frame = XtVaCreateManagedWidget("messageFrame", xmFrameWidgetClass, conversation_container,
+                                           XmNshadowType, XmSHADOW_ETCHED_IN,
+                                           NULL);
+    
+    Widget form = XtVaCreateManagedWidget("messageForm", xmFormWidgetClass, frame,
+                                          XmNmarginWidth, UI_SPACING,
+                                          XmNmarginHeight, UI_SPACING,
+                                          NULL);
+    
+    char header_buf[128];
+    snprintf(header_buf, sizeof(header_buf), "%s", (role == DP_ROLE_USER) ? USER_NICKNAME : 
+             (role == DP_ROLE_ASSISTANT ? ASSISTANT_NICKNAME : "System/Tool"));
+    
+    Widget header = XtVaCreateManagedWidget(header_buf, xmLabelWidgetClass, form,
+                                            XmNtopAttachment, XmATTACH_FORM,
+                                            XmNleftAttachment, XmATTACH_FORM,
+                                            XmNalignment, XmALIGNMENT_BEGINNING,
+                                            NULL);
+    
+    // Action bar
+    Widget action_bar = XtVaCreateManagedWidget("actionBar", xmRowColumnWidgetClass, form,
+                                                XmNorientation, XmHORIZONTAL,
+                                                XmNtopAttachment, XmATTACH_FORM,
+                                                XmNrightAttachment, XmATTACH_FORM,
+                                                XmNpacking, XmPACK_TIGHT,
+                                                NULL);
+    
+    if (role == DP_ROLE_USER) {
+        Widget retry_btn = XtVaCreateManagedWidget("Retry", xmPushButtonWidgetClass, action_bar, NULL);
+        XtAddCallback(retry_btn, XmNactivateCallback, retry_callback, (XtPointer)(long)history_idx);
+    }
+    
+    Widget copy_btn = XtVaCreateManagedWidget("Copy", xmPushButtonWidgetClass, action_bar, NULL);
+    XtAddCallback(copy_btn, XmNactivateCallback, copy_message_callback, (XtPointer)strdup(text));
+
+    Widget content = XmCreateText(form, "messageContent", NULL, 0);
+    XtVaSetValues(content,
+                  XmNeditMode, XmMULTI_LINE_EDIT,
+                  XmNeditable, False,
+                  XmNcursorPositionVisible, False,
+                  XmNwordWrap, True,
+                  XmNscrollHorizontal, False,
+                  XmNbackground, WhitePixelOfScreen(XtScreen(content)),
+                  XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, header,
+                  XmNtopOffset, 5,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  NULL);
+    XmTextSetString(content, (char*)text);
+    
+    // Auto-size height based on content
+    int rows = (strlen(text) / 60) + 1;
+    for(const char* p=text; *p; p++) if(*p=='\n') rows++;
+    if (rows > 20) rows = 20;
+    XtVaSetValues(content, XmNrows, rows, NULL);
+    
+    XtManageChild(content);
+}
+
 void render_all_history() {
-    if (!conversation_text) return;
+    if (!conversation_container) return;
 
-    static const size_t user_nick_len = sizeof(USER_NICKNAME) - 1;
-    static const size_t assistant_nick_len = sizeof(ASSISTANT_NICKNAME) - 1;
-    static const char img_msg[] = " [Image Attached]";
-    static const size_t img_msg_len = sizeof(img_msg) - 1;
-
-    // 1. Calculate required buffer size and store part lengths
-    size_t total_len = 0;
-    size_t total_parts = 0;
-    for (int i = 0; i < chat_history_count; i++) {
-        total_parts += chat_history[i].num_parts;
+    // Remove all existing widgets
+    WidgetList children;
+    Cardinal num_children;
+    XtVaGetValues(conversation_container, XmNchildren, &children, XmNnumChildren, &num_children, NULL);
+    for (int i = num_children - 1; i >= 0; i--) {
+        XtDestroyWidget(children[i]);
     }
 
-    size_t *part_lengths = NULL;
-    if (total_parts > 0) {
-        part_lengths = malloc(total_parts * sizeof(size_t));
-        if (!part_lengths) {
-            perror("malloc part_lengths");
-            return;
-        }
-    }
-
-    size_t part_idx = 0;
+    pthread_mutex_lock(&history_mutex);
     for (int i = 0; i < chat_history_count; i++) {
-        size_t nick_len = (chat_history[i].role == DP_ROLE_USER) ? user_nick_len : assistant_nick_len;
-        total_len += nick_len + 2; // "Nick: "
-
+        char* combined_text = malloc(8192); combined_text[0] = '\0';
         for (size_t j = 0; j < chat_history[i].num_parts; j++) {
-            dp_content_part_t* part = &chat_history[i].parts[j];
-            if (part->type == DP_CONTENT_PART_TEXT) {
-                if (part->text) {
-                    size_t len = strlen(part->text);
-                    part_lengths[part_idx] = len;
-                    total_len += len;
-                } else {
-                    part_lengths[part_idx] = 0;
-                }
-            } else if (part->type == DP_CONTENT_PART_IMAGE_BASE64) {
-                part_lengths[part_idx] = img_msg_len;
-                total_len += img_msg_len;
+            if (chat_history[i].parts[j].type == DP_CONTENT_PART_TEXT && chat_history[i].parts[j].text) {
+                strncat(combined_text, chat_history[i].parts[j].text, 8191 - strlen(combined_text));
             }
-            part_idx++;
         }
-        total_len += 1; // "\n"
+        add_message_widget(chat_history[i].role, combined_text, i);
+        free(combined_text);
     }
-
-    // 2. Allocate buffer
-    char* full_history = malloc(total_len + 1);
-    if (!full_history) {
-        perror("malloc render_all_history");
-        free(part_lengths);
-        return;
+    pthread_mutex_unlock(&history_mutex);
+    
+    // Scroll to bottom
+    Widget scrolled_win = XtParent(conversation_container);
+    Widget vbar;
+    XtVaGetValues(scrolled_win, XmNverticalScrollBar, &vbar, NULL);
+    if (vbar) {
+        int max_val;
+        XtVaGetValues(vbar, XmNmaximum, &max_val, NULL);
+        XmScrollBarSetValues(vbar, max_val, 0, 0, 0, True);
     }
-
-    // 3. Construct string
-    char* current_pos = full_history;
-    part_idx = 0;
-    for (int i = 0; i < chat_history_count; i++) {
-        const char* nick = (chat_history[i].role == DP_ROLE_USER) ? USER_NICKNAME : ASSISTANT_NICKNAME;
-        size_t nick_len = (chat_history[i].role == DP_ROLE_USER) ? user_nick_len : assistant_nick_len;
-
-        memcpy(current_pos, nick, nick_len);
-        current_pos += nick_len;
-        memcpy(current_pos, ": ", 2);
-        current_pos += 2;
-
-        for (size_t j = 0; j < chat_history[i].num_parts; j++) {
-            dp_content_part_t* part = &chat_history[i].parts[j];
-            size_t len = (part_lengths != NULL) ? part_lengths[part_idx] : 0;
-            if (part->type == DP_CONTENT_PART_TEXT && part->text) {
-                memcpy(current_pos, part->text, len);
-                current_pos += len;
-            } else if (part->type == DP_CONTENT_PART_IMAGE_BASE64) {
-                 memcpy(current_pos, img_msg, len);
-                 current_pos += len;
-            }
-            part_idx++;
-        }
-        *current_pos = '\n';
-        current_pos++;
-    }
-    *current_pos = '\0';
-
-    // 4. Update UI once
-    XmTextSetString(conversation_text, full_history);
-    XmTextShowPosition(conversation_text, XmTextGetLastPosition(conversation_text));
-
-    // 5. Cleanup
-    free(full_history);
-    free(part_lengths);
 }
 
 
@@ -1654,29 +1848,39 @@ Widget create_provider_settings_tab(Widget parent, const char *prefix,
 
 void settings_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     if (settings_shell == NULL) {
-        settings_shell = XtVaCreatePopupShell("settingsShell", topLevelShellWidgetClass, app_shell, XmNtitle, "MotifGPT Settings", XmNwidth, 550, XmNheight, 600, NULL);
-        Widget dialog_form = XtVaCreateManagedWidget("dialogForm", xmFormWidgetClass, settings_shell, XmNverticalSpacing, UI_SPACING_MEDIUM, XmNhorizontalSpacing, UI_SPACING_MEDIUM, NULL);
-        Widget tab_button_rc = XtVaCreateManagedWidget("tabButtonRc", xmRowColumnWidgetClass, dialog_form, XmNorientation, XmHORIZONTAL, XmNradioBehavior, True, XmNindicatorType, XmONE_OF_MANY, XmNentryAlignment, XmALIGNMENT_CENTER, XmNpacking, XmPACK_TIGHT, XmNspacing, 0, XmNtopAttachment, XmATTACH_FORM, XmNtopOffset, UI_SPACING_MEDIUM, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, UI_SPACING_MEDIUM, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, UI_SPACING_MEDIUM, XmNshadowThickness, 0, NULL);
+        settings_shell = XtVaCreatePopupShell("settingsShell", topLevelShellWidgetClass, app_shell, XmNtitle, "MotifGPT Settings", XmNwidth, 650, XmNheight, 600, NULL);
+        Widget dialog_form = XtVaCreateManagedWidget("dialogForm", xmFormWidgetClass, settings_shell, XmNverticalSpacing, UI_SPACING, XmNhorizontalSpacing, UI_SPACING, NULL);
+        Widget tab_button_rc = XtVaCreateManagedWidget("tabButtonRc", xmRowColumnWidgetClass, dialog_form, XmNorientation, XmHORIZONTAL, XmNradioBehavior, True, XmNindicatorType, XmONE_OF_MANY, XmNentryAlignment, XmALIGNMENT_CENTER, XmNpacking, XmPACK_TIGHT, XmNspacing, 0, XmNtopAttachment, XmATTACH_FORM, XmNtopOffset, UI_SPACING, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, UI_SPACING, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, UI_SPACING, XmNshadowThickness, 0, NULL);
         Widget general_tab_btn = XtVaCreateManagedWidget("General", xmToggleButtonWidgetClass, tab_button_rc, XmNindicatorOn, False, XmNshadowThickness, 2, NULL);
         Widget gemini_tab_btn = XtVaCreateManagedWidget("Gemini", xmToggleButtonWidgetClass, tab_button_rc, XmNindicatorOn, False, XmNshadowThickness, 2, NULL);
         Widget openai_tab_btn = XtVaCreateManagedWidget("OpenAI", xmToggleButtonWidgetClass, tab_button_rc, XmNindicatorOn, False, XmNshadowThickness, 2, NULL);
         Widget anthropic_tab_btn = XtVaCreateManagedWidget("Anthropic", xmToggleButtonWidgetClass, tab_button_rc, XmNindicatorOn, False, XmNshadowThickness, 2, NULL);
+        Widget plugins_tab_btn = XtVaCreateManagedWidget("Plugins", xmToggleButtonWidgetClass, tab_button_rc, XmNindicatorOn, False, XmNshadowThickness, 2, NULL);
+        
+        XtManageChild(general_tab_btn);
+        XtManageChild(gemini_tab_btn);
+        XtManageChild(openai_tab_btn);
+        XtManageChild(anthropic_tab_btn);
+        XtManageChild(plugins_tab_btn);
+
         XtAddCallback(general_tab_btn, XmNvalueChangedCallback, settings_tab_change_callback, (XtPointer)0);
         XtAddCallback(gemini_tab_btn, XmNvalueChangedCallback, settings_tab_change_callback, (XtPointer)1);
         XtAddCallback(openai_tab_btn, XmNvalueChangedCallback, settings_tab_change_callback, (XtPointer)2);
         XtAddCallback(anthropic_tab_btn, XmNvalueChangedCallback, settings_tab_change_callback, (XtPointer)3);
-        Widget content_frame = XtVaCreateManagedWidget("contentFrame", xmFrameWidgetClass, dialog_form, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, tab_button_rc, XmNtopOffset, UI_SPACING_MEDIUM, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, UI_SPACING_MEDIUM, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, UI_SPACING_MEDIUM, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 45, XmNshadowType, XmSHADOW_ETCHED_IN, NULL);
+        XtAddCallback(plugins_tab_btn, XmNvalueChangedCallback, settings_tab_change_callback, (XtPointer)4);
+        Widget content_frame = XtVaCreateManagedWidget("contentFrame", xmFrameWidgetClass, dialog_form, XmNtopAttachment, XmATTACH_WIDGET, XmNtopWidget, tab_button_rc, XmNtopOffset, UI_SPACING, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, UI_SPACING, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, UI_SPACING, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 45, XmNshadowType, XmSHADOW_ETCHED_IN, NULL);
 
         create_general_tab(content_frame);
-        settings_gemini_tab_content = create_provider_settings_tab(content_frame, "gemini", &gemini_api_key_text, DEFAULT_GEMINI_KEY_PLACEHOLDER, &gemini_model_text, DEFAULT_GEMINI_MODEL, &gemini_model_list, NULL, NULL, 0);
-        settings_openai_tab_content = create_provider_settings_tab(content_frame, "openai", &openai_api_key_text, DEFAULT_OPENAI_KEY_PLACEHOLDER, &openai_model_text, DEFAULT_OPENAI_MODEL, &openai_model_list, &openai_base_url_text, DEFAULT_OPENAI_BASE_URL, 1);
-        settings_anthropic_tab_content = create_provider_settings_tab(content_frame, "anthropic", &anthropic_api_key_text, DEFAULT_ANTHROPIC_KEY_PLACEHOLDER, &anthropic_model_text, DEFAULT_ANTHROPIC_MODEL, &anthropic_model_list, NULL, NULL, 2);
+        settings_gemini_tab_content = create_provider_settings_tab(content_frame, "gemini", &gemini_api_key_text, DEFAULT_GEMINI_KEY_PLACEHOLDER, &gemini_model_text, DEFAULT_GEMINI_MODEL, &gemini_model_list, NULL, NULL, 1);
+        settings_openai_tab_content = create_provider_settings_tab(content_frame, "openai", &openai_api_key_text, DEFAULT_OPENAI_KEY_PLACEHOLDER, &openai_model_text, DEFAULT_OPENAI_MODEL, &openai_model_list, &openai_base_url_text, DEFAULT_OPENAI_BASE_URL, 2);
+        settings_anthropic_tab_content = create_provider_settings_tab(content_frame, "anthropic", &anthropic_api_key_text, DEFAULT_ANTHROPIC_KEY_PLACEHOLDER, &anthropic_model_text, DEFAULT_ANTHROPIC_MODEL, &anthropic_model_list, NULL, NULL, 3);
+        create_plugins_tab(content_frame);
 
         Widget button_rc_bottom = XtVaCreateManagedWidget("buttonRcBottom", xmRowColumnWidgetClass, dialog_form,
                                                    XmNorientation, XmHORIZONTAL, XmNpacking, XmPACK_TIGHT,
-                                                   XmNentryAlignment, XmALIGNMENT_CENTER, XmNspacing, UI_SPACING_LARGE,
-                                                   XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, UI_SPACING_MEDIUM,
-                                                   XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, UI_SPACING_MEDIUM,
+                                                   XmNentryAlignment, XmALIGNMENT_CENTER, XmNspacing, UI_SPACING,
+                                                   XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, UI_SPACING,
+                                                   XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, UI_SPACING,
                                                    NULL);
         Widget ok_button = XtVaCreateManagedWidget("OK", xmPushButtonWidgetClass, button_rc_bottom, NULL);
         Widget cancel_button = XtVaCreateManagedWidget("Cancel", xmPushButtonWidgetClass, button_rc_bottom, NULL);
@@ -1742,32 +1946,86 @@ void setup_ui(void) {
     select_all_button = XtVaCreateManagedWidget("Select All", xmPushButtonWidgetClass, edit_menu, XmNmnemonic, XK_A, XmNaccelerator, "Ctrl<Key>a", XmNacceleratorText, acc_text_ctrl_a, NULL);
     XmStringFree(acc_text_ctrl_a); XtAddCallback(select_all_button, XmNactivateCallback, select_all_callback, NULL);
 
-    main_form = XtVaCreateWidget("mainForm", xmFormWidgetClass, main_window, XmNwidth, 600, XmNheight, 450, NULL); XtManageChild(main_form);
-    chat_area_paned = XtVaCreateManagedWidget("chatAreaPaned", xmPanedWindowWidgetClass, main_form, XmNtopAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNsashWidth, 1, XmNsashHeight, 1, NULL);
+    main_form = XtVaCreateWidget("mainForm", xmFormWidgetClass, main_window,
+                                 XmNwidth, UI_WINDOW_MIN_W, XmNheight, UI_WINDOW_MIN_H,
+                                 XmNmarginWidth, UI_MARGIN, XmNmarginHeight, UI_MARGIN,
+                                 XmNhorizontalSpacing, UI_SPACING, XmNverticalSpacing, UI_SPACING,
+                                 NULL);
+    XtManageChild(main_form);
+
+    chat_area_paned = XtVaCreateManagedWidget("chatAreaPaned", xmPanedWindowWidgetClass, main_form,
+                                              XmNtopAttachment, XmATTACH_FORM,
+                                              XmNbottomAttachment, XmATTACH_FORM,
+                                              XmNleftAttachment, XmATTACH_FORM,
+                                              XmNrightAttachment, XmATTACH_FORM,
+                                              XmNsashWidth, 10, XmNsashHeight, 10,
+                                              XmNspacing, UI_SPACING,
+                                              NULL);
+
     Widget scrolled_conv_win = XmCreateScrolledWindow(chat_area_paned, "scrolledConvWin", NULL, 0);
-    XtVaSetValues(scrolled_conv_win, XmNpaneMinimum, 100, XmNpaneMaximum, 1000, XmNscrollingPolicy, XmAUTOMATIC, NULL);
-    conversation_text = XmCreateText(scrolled_conv_win, "conversationText", NULL, 0);
-    XtVaSetValues(conversation_text, XmNeditMode, XmMULTI_LINE_EDIT, XmNeditable, False, XmNcursorPositionVisible, False, XmNwordWrap, True, XmNscrollHorizontal, False, XmNrows, 15, XmNbackground, WhitePixelOfScreen(XtScreen(conversation_text)), XmNresizeWidth, False, NULL);
-    XtManageChild(conversation_text); XtManageChild(scrolled_conv_win);
-    XmScrolledWindowSetAreas(scrolled_conv_win, NULL, NULL, conversation_text);
-    XtAddCallback(conversation_text, XmNfocusCallback, focus_callback, NULL);
-    XtAddEventHandler(conversation_text, ButtonPressMask, False, popup_handler, NULL);
-    XtAddEventHandler(conversation_text, KeyPressMask, False, app_text_key_press_handler, NULL);
+    XtVaSetValues(scrolled_conv_win, XmNpaneMinimum, 150, XmNpaneMaximum, 1000, XmNscrollingPolicy, XmAUTOMATIC, NULL);
+    
+    conversation_container = XtVaCreateManagedWidget("conversationContainer", xmRowColumnWidgetClass, scrolled_conv_win,
+                                                     XmNorientation, XmVERTICAL,
+                                                     XmNpacking, XmPACK_TIGHT,
+                                                     XmNspacing, UI_SPACING,
+                                                     XmNmarginWidth, UI_SPACING,
+                                                     XmNmarginHeight, UI_SPACING,
+                                                     NULL);
+    XtManageChild(scrolled_conv_win);
 
+    input_form = XtVaCreateWidget("inputForm", xmFormWidgetClass, chat_area_paned,
+                                  XmNpaneMinimum, 120, XmNpaneMaximum, 300,
+                                  XmNhorizontalSpacing, UI_SPACING,
+                                  XmNverticalSpacing, UI_SPACING,
+                                  NULL);
+    XtManageChild(input_form);
 
-    input_form = XtVaCreateWidget("inputForm", xmFormWidgetClass, chat_area_paned, XmNpaneMinimum, 120, XmNpaneMaximum, 250, XmNfractionBase, 10, NULL); XtManageChild(input_form);
-    bottom_buttons_form = XtVaCreateManagedWidget("bottomButtonsForm", xmFormWidgetClass, input_form, XmNbottomAttachment, XmATTACH_FORM, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNheight, 35, NULL);
-    attach_image_button = XtVaCreateManagedWidget("Attach Image...", xmPushButtonWidgetClass, bottom_buttons_form, XmNleftAttachment, XmATTACH_FORM, XmNleftOffset, 5, XmNtopAttachment, XmATTACH_FORM, XmNtopOffset, 2, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 2, NULL);
+    bottom_buttons_form = XtVaCreateManagedWidget("bottomButtonsForm", xmFormWidgetClass, input_form,
+                                                  XmNbottomAttachment, XmATTACH_FORM,
+                                                  XmNleftAttachment, XmATTACH_FORM,
+                                                  XmNrightAttachment, XmATTACH_FORM,
+                                                  XmNmarginHeight, 2,
+                                                  NULL);
+
+    attach_image_button = XtVaCreateManagedWidget("Attach Image...", xmPushButtonWidgetClass, bottom_buttons_form,
+                                                  XmNleftAttachment, XmATTACH_FORM,
+                                                  XmNtopAttachment, XmATTACH_FORM,
+                                                  XmNbottomAttachment, XmATTACH_FORM,
+                                                  NULL);
     XtAddCallback(attach_image_button, XmNactivateCallback, attach_image_callback, NULL);
-    send_button = XtVaCreateManagedWidget("Send", xmPushButtonWidgetClass, bottom_buttons_form, XmNrightAttachment, XmATTACH_FORM, XmNrightOffset, 5, XmNleftAttachment, XmATTACH_WIDGET, XmNleftWidget, attach_image_button, XmNleftOffset, 5, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 2, XmNtopAttachment, XmATTACH_FORM, XmNtopOffset, 2, XmNdefaultButtonShadowThickness, 1, NULL);
+
+    send_button = XtVaCreateManagedWidget("Send", xmPushButtonWidgetClass, bottom_buttons_form,
+                                          XmNrightAttachment, XmATTACH_FORM,
+                                          XmNleftAttachment, XmATTACH_WIDGET, XmNleftWidget, attach_image_button,
+                                          XmNleftOffset, UI_SPACING,
+                                          XmNbottomAttachment, XmATTACH_FORM,
+                                          XmNtopAttachment, XmATTACH_FORM,
+                                          XmNdefaultButtonShadowThickness, 1,
+                                          NULL);
     XtAddCallback(send_button, XmNactivateCallback, send_message_callback, NULL);
     XtVaSetValues(input_form, XmNdefaultButton, send_button, NULL);
 
     Widget scrolled_input_win = XmCreateScrolledWindow(input_form, "scrolledInputWin", NULL, 0);
-    XtVaSetValues(scrolled_input_win, XmNtopAttachment, XmATTACH_FORM, XmNbottomAttachment, XmATTACH_WIDGET, XmNbottomWidget, bottom_buttons_form, XmNleftAttachment, XmATTACH_FORM, XmNrightAttachment, XmATTACH_FORM, XmNscrollingPolicy, XmAUTOMATIC, NULL);
+    XtVaSetValues(scrolled_input_win,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_WIDGET, XmNbottomWidget, bottom_buttons_form,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNscrollingPolicy, XmAUTOMATIC,
+                  NULL);
+
     input_text = XmCreateText(scrolled_input_win, "inputText", NULL, 0);
-    XtVaSetValues(input_text, XmNeditMode, XmMULTI_LINE_EDIT, XmNrows, 3, XmNwordWrap, True, XmNbackground, WhitePixelOfScreen(XtScreen(input_text)), XmNresizeWidth, False, NULL);
-    XtManageChild(input_text); XtManageChild(scrolled_input_win);
+    XtVaSetValues(input_text,
+                  XmNeditMode, XmMULTI_LINE_EDIT,
+                  XmNrows, 4,
+                  XmNwordWrap, True,
+                  XmNbackground, WhitePixelOfScreen(XtScreen(input_text)),
+                  XmNmarginWidth, UI_SPACING,
+                  XmNmarginHeight, UI_SPACING,
+                  NULL);
+    XtManageChild(input_text);
+    XtManageChild(scrolled_input_win);
     XmScrolledWindowSetAreas(scrolled_input_win, NULL, NULL, input_text);
     XtAddEventHandler(input_text, KeyPressMask, False, input_text_key_press_handler, NULL);
     XtAddEventHandler(input_text, KeyPressMask, True, app_text_key_press_handler, NULL);
@@ -1782,12 +2040,15 @@ void setup_ui(void) {
 int main(int argc, char **argv) {
     XtAppContext app_context;
 
+    XInitThreads();
+
     if (ensure_config_dir_exists() != 0) {
         fprintf(stderr, "Warning: Could not create/access config directory. Settings may not persist.\n");
     }
     load_settings();
 
     init_assistant_buffer();
+    load_plugins("./plugins");
 
     if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) { fprintf(stderr, "Fatal: curl_global_init failed.\n"); return 1; }
     initialize_dp_context();
@@ -1824,7 +2085,8 @@ int main(int argc, char **argv) {
     XtAppAddInput(app_context, pipe_fds[0], (XtPointer)XtInputReadMask, handle_pipe_input, NULL);
     XtRealizeWidget(app_shell);
     focused_text_widget = input_text;
-    append_to_conversation("Welcome to MotifGPT! Type message, Shift+Enter for newline, Enter to send.\n");
+    add_message_to_history(DP_ROLE_SYSTEM, "Welcome to MotifGPT! Type message, Shift+Enter for newline, Enter to send.", NULL, NULL);
+    render_all_history();
     XtAppMainLoop(app_context);
 
     free_assistant_buffer();

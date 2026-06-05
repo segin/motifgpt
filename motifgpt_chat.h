@@ -10,7 +10,9 @@ typedef enum {
     PIPE_MSG_ERROR,
     PIPE_MSG_MODEL_LIST_ITEM,
     PIPE_MSG_MODEL_LIST_END,
-    PIPE_MSG_MODEL_LIST_ERROR
+    PIPE_MSG_MODEL_LIST_ERROR,
+    PIPE_MSG_THINKING,
+    PIPE_MSG_TOOL_RESULT
 } pipe_message_type_t;
 
 typedef struct {

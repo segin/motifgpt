@@ -16,6 +16,7 @@ typedef struct {
     const char* plugin_name;
     motifgpt_tool_t* tools;
     int num_tools;
+    void (*show_settings_dialog)(Widget parent); // Callback to show a plugin-specific settings dialog
 } motifgpt_plugin_t;
 
 // Plugins must export this function

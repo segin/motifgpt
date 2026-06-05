@@ -2,10 +2,12 @@
 #define BUFFER_UTILS_H
 
 #include <stddef.h>
+#include <pthread.h>
 
 extern char *current_assistant_response_buffer;
 extern size_t current_assistant_response_len;
 extern size_t current_assistant_response_capacity;
+extern pthread_mutex_t assistant_buffer_mutex;
 
 /**
  * Initializes the assistant response buffer.

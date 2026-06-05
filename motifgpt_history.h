@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdbool.h>
+#include <pthread.h>
 #include "disasterparty.h"
 
 // Define max history capacity if not already defined
@@ -14,6 +15,7 @@
 extern dp_message_t *chat_history;
 extern int chat_history_count;
 extern int chat_history_capacity;
+extern pthread_mutex_t history_mutex;
 
 // Configuration variables (defined elsewhere, e.g., in motifgpt.c or tests)
 extern int current_max_history_messages;
