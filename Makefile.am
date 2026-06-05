@@ -33,7 +33,7 @@ test_config_CPPFLAGS = -I$(top_srcdir)
 test_history_SOURCES = tests/test_history.c motifgpt_history.c
 test_history_CPPFLAGS = -I$(top_srcdir)
 
-test_stream_handler_SOURCES = tests/test_stream_handler.c motifgpt_chat.c
+test_stream_handler_SOURCES = tests/test_stream_handler.c motifgpt_chat.c buffer_utils.c
 test_stream_handler_CPPFLAGS = -I$(top_srcdir)
 
 test_buffer_utils_SOURCES = tests/test_buffer_utils.c buffer_utils.c
