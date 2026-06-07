@@ -103,8 +103,10 @@ char* stock_execute(const char* args_json) {
         return strdup("Error: Symbol not found or invalid API response.");
     }
 
-    const char* price = cJSON_GetObjectItemCaseSensitive(quote, "05. price")->valuestring;
-    const char* change = cJSON_GetObjectItemCaseSensitive(quote, "10. change percent")->valuestring;
+    cJSON* price_node = cJSON_GetObjectItemCaseSensitive(quote, "05. price");
+    cJSON* change_node = cJSON_GetObjectItemCaseSensitive(quote, "10. change percent");
+    const char* price = cJSON_IsString(price_node) ? price_node->valuestring : NULL;
+    const char* change = cJSON_IsString(change_node) ? change_node->valuestring : NULL;
 
     char* result_msg = malloc(512);
     snprintf(result_msg, 512, "Stock info for %s: Price: $%s, Change: %s", symbol_param->valuestring, price ? price : "N/A", change ? change : "N/A");

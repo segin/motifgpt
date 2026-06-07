@@ -223,7 +223,6 @@ typedef struct {
 
 void *perform_tool_call_thread(void *arg) {
     tool_thread_data_t *data = (tool_thread_data_t *)arg;
-    fprintf(stderr, "DEBUG: ToolThread %lu: Executing tool call: %s\n", (unsigned long)pthread_self(), data->tool_call_json);
     
     cJSON* json = cJSON_Parse(data->tool_call_json);
     char* result_to_send = NULL;
@@ -447,7 +446,6 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
                      batch_len = 0;
                  }
 
-                 fprintf(stderr, "DEBUG: UI: Received pipe message type %d\n", msg.type);
 
                  switch (msg.type) {
                      case PIPE_MSG_THINKING:
@@ -459,7 +457,6 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
                         }
                         break;
                      case PIPE_MSG_STREAM_END:
-                        fprintf(stderr, "DEBUG: UI: PIPE_MSG_STREAM_END\n");
                         stop_thinking_indicator();
                         
                         bool is_tool_call = false;
@@ -467,7 +464,6 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
                         
                         pthread_mutex_lock(&assistant_buffer_mutex);
                         if (current_assistant_response_buffer && current_assistant_response_len > 0) {
-                            fprintf(stderr, "DEBUG: UI: Response len: %zu\n", current_assistant_response_len);
                             add_message_to_history(DP_ROLE_ASSISTANT, current_assistant_response_buffer, NULL, NULL);
                             
                             const char* tc_start = strstr(current_assistant_response_buffer, "<tool_call>");
@@ -475,7 +471,6 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
                             if (tc_start && tc_end && tc_end > tc_start) {
                                 is_tool_call = true;
                                 size_t tc_len = tc_end - tc_start - 11;
-                                fprintf(stderr, "DEBUG: UI: Detected tool call (len %zu)\n", tc_len);
                                 tool_call_json = malloc(tc_len + 1);
                                 if (tool_call_json) {
                                     strncpy(tool_call_json, tc_start + 11, tc_len);
@@ -501,14 +496,12 @@ void handle_pipe_input(XtPointer client_data, int *source, XtInputId *id) {
                         }
                         break;
                      case PIPE_MSG_ERROR:
-                        fprintf(stderr, "DEBUG: UI: PIPE_MSG_ERROR: %s\n", msg.data);
                         stop_thinking_indicator();
                         show_error_dialog(msg.data);
                         render_all_history();
                         assistant_is_replying = false; prefix_already_added_for_current_reply = false;
                         break;
                      case PIPE_MSG_TOOL_RESULT:
-                        fprintf(stderr, "DEBUG: UI: PIPE_MSG_TOOL_RESULT received\n");
                         render_all_history();
                         start_llm_request_internal(true);
                         break;
@@ -553,7 +546,6 @@ void *perform_llm_request_thread(void *arg) {
     llm_thread_data_t *thread_data = (llm_thread_data_t *)arg;
     dp_response_t response_status = {0};
 
-    fprintf(stderr, "DEBUG: Thread %lu: Starting perform_llm_request_thread...\n", (unsigned long)pthread_self());
 
     write_pipe_message(PIPE_MSG_THINKING, NULL);
 
@@ -561,14 +553,11 @@ void *perform_llm_request_thread(void *arg) {
     if (strlen(thread_data->temp_history_filename) > 0) {
         dp_message_t *loaded_messages = NULL;
         size_t num_loaded = 0;
-        fprintf(stderr, "DEBUG: Thread %lu: Deserializing history from %s...\n", (unsigned long)pthread_self(), thread_data->temp_history_filename);
         if (dp_deserialize_messages_from_file(thread_data->temp_history_filename, &loaded_messages, &num_loaded) == 0) {
             thread_data->config.messages = loaded_messages;
             thread_data->config.num_messages = num_loaded;
             unlink(thread_data->temp_history_filename); // Remove file immediately after loading
-            fprintf(stderr, "DEBUG: Thread %lu: Loaded %zu messages.\n", (unsigned long)pthread_self(), num_loaded);
         } else {
-             fprintf(stderr, "ERROR: Thread %lu: Failed to load chat history from %s.\n", (unsigned long)pthread_self(), thread_data->temp_history_filename);
              write_pipe_message(PIPE_MSG_ERROR, "Failed to load chat history for request.");
              unlink(thread_data->temp_history_filename);
              free(thread_data);
@@ -577,7 +566,6 @@ void *perform_llm_request_thread(void *arg) {
         }
     }
 
-    fprintf(stderr, "DEBUG: Thread %lu: LLM request with %d messages.\n", (unsigned long)pthread_self(), (int)thread_data->config.num_messages);
 
     // Point the config's system_prompt to the buffer inside the struct
     if (strlen(thread_data->system_prompt_buffer) > 0) {
@@ -586,18 +574,12 @@ void *perform_llm_request_thread(void *arg) {
         thread_data->config.system_prompt = NULL;
     }
 
-    fprintf(stderr, "DEBUG: Thread %lu: Locking dp_mutex...\n", (unsigned long)pthread_self());
     pthread_mutex_lock(&dp_mutex);
     int ret = -1;
     if (dp_ctx) {
-        fprintf(stderr, "DEBUG: Thread %lu: Calling dp_perform_streaming_completion (Model: %s)...\n", (unsigned long)pthread_self(), thread_data->config.model);
         ret = dp_perform_streaming_completion(dp_ctx, &thread_data->config, stream_handler, NULL, &response_status);
-        fprintf(stderr, "DEBUG: Thread %lu: dp_perform_streaming_completion returned %d.\n", (unsigned long)pthread_self(), ret);
-    } else {
-        fprintf(stderr, "ERROR: Thread %lu: dp_ctx is NULL!\n", (unsigned long)pthread_self());
     }
     pthread_mutex_unlock(&dp_mutex);
-    fprintf(stderr, "DEBUG: Thread %lu: Released dp_mutex.\n", (unsigned long)pthread_self());
 
     if (ret != 0) {
         char err_buf[1024];
@@ -607,7 +589,6 @@ void *perform_llm_request_thread(void *arg) {
              snprintf(err_buf, sizeof(err_buf), "LLM Request Failed (Thread) (HTTP %ld): %s",
                  response_status.http_status_code, response_status.error_message ? response_status.error_message : "DP error in thread.");
         }
-        fprintf(stderr, "ERROR: Thread %lu: %s\n", (unsigned long)pthread_self(), err_buf);
         write_pipe_message(PIPE_MSG_ERROR, err_buf);
     }
     dp_free_response_content(&response_status);
@@ -619,7 +600,6 @@ void *perform_llm_request_thread(void *arg) {
     }
 
     free(thread_data);
-    fprintf(stderr, "DEBUG: Thread %lu: perform_llm_request_thread exiting.\n", (unsigned long)pthread_self());
     pthread_detach(pthread_self());
     return NULL;
 }
@@ -680,7 +660,6 @@ void start_llm_request_internal(bool from_tool_call) {
     memset(thread_data, 0, sizeof(llm_thread_data_t));
     thread_data->system_prompt_buffer[0] = '\0';
 
-    fprintf(stderr, "DEBUG: UI: start_llm_request_internal(from_tool_call=%d)\n", from_tool_call);
 
     if (current_api_provider == DP_PROVIDER_GOOGLE_GEMINI) {
         thread_data->config.model = current_gemini_model;
@@ -730,10 +709,8 @@ void start_llm_request_internal(bool from_tool_call) {
         snprintf(current_assistant_prefix, sizeof(current_assistant_prefix), "%s (tool result): ", USER_NICKNAME);
     }
     
-    fprintf(stderr, "DEBUG: UI: Creating LLM request thread...\n");
     pthread_t tid;
     if (pthread_create(&tid, NULL, perform_llm_request_thread, thread_data) != 0) {
-        fprintf(stderr, "ERROR: UI: pthread_create failed\n");
         perror("pthread_create llm_request");
         if (strlen(thread_data->temp_history_filename) > 0) unlink(thread_data->temp_history_filename);
         free(thread_data);
@@ -1631,7 +1608,6 @@ static void numeric_verify_cb(Widget w, XtPointer client_data, XtPointer call_da
 
 void retry_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     int history_index = (int)(long)client_data;
-    fprintf(stderr, "DEBUG: UI: Retry triggered for message index %d\n", history_index);
     
     pthread_mutex_lock(&history_mutex);
     if (history_index < chat_history_count) {
@@ -1649,12 +1625,16 @@ void retry_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     start_llm_request_internal(false);
 }
 
+// Frees a strdup'd client_data when its widget is destroyed (e.g. on re-render).
+void free_strdup_client_data(Widget w, XtPointer client_data, XtPointer call_data) {
+    free(client_data);
+}
+
 void copy_message_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     char* text = (char*)client_data;
     if (!text) return;
-    
+
     Display* dpy = XtDisplay(app_shell);
-    Atom clipboard = XInternAtom(dpy, "CLIPBOARD", False);
     XmTextSetString(input_text, text); // Simple way to get it into a buffer Motif likes
     XmTextSetSelection(input_text, 0, strlen(text), XtLastTimestampProcessed(dpy));
     XmTextCopy(input_text, XtLastTimestampProcessed(dpy));
@@ -1695,7 +1675,9 @@ void add_message_widget(dp_message_role_t role, const char* text, int history_id
     }
     
     Widget copy_btn = XtVaCreateManagedWidget("Copy", xmPushButtonWidgetClass, action_bar, NULL);
-    XtAddCallback(copy_btn, XmNactivateCallback, copy_message_callback, (XtPointer)strdup(text));
+    char* copy_text = strdup(text);
+    XtAddCallback(copy_btn, XmNactivateCallback, copy_message_callback, (XtPointer)copy_text);
+    XtAddCallback(copy_btn, XmNdestroyCallback, free_strdup_client_data, (XtPointer)copy_text);
 
     Widget content = XmCreateText(form, "messageContent", NULL, 0);
     XtVaSetValues(content,

@@ -95,9 +95,17 @@ char* weather_execute(const char* args_json) {
     }
 
     cJSON* first_result = cJSON_GetArrayItem(results, 0);
-    double lat = cJSON_GetObjectItemCaseSensitive(first_result, "latitude")->valuedouble;
-    double lon = cJSON_GetObjectItemCaseSensitive(first_result, "longitude")->valuedouble;
-    const char* name = cJSON_GetObjectItemCaseSensitive(first_result, "name")->valuestring;
+    cJSON* lat_node = cJSON_GetObjectItemCaseSensitive(first_result, "latitude");
+    cJSON* lon_node = cJSON_GetObjectItemCaseSensitive(first_result, "longitude");
+    cJSON* name_node = cJSON_GetObjectItemCaseSensitive(first_result, "name");
+    if (!cJSON_IsNumber(lat_node) || !cJSON_IsNumber(lon_node) || !cJSON_IsString(name_node)) {
+        cJSON_Delete(geo_json);
+        cJSON_Delete(json);
+        return strdup("Error: Incomplete geocoding response");
+    }
+    double lat = lat_node->valuedouble;
+    double lon = lon_node->valuedouble;
+    const char* name = name_node->valuestring;
 
     // 2. Weather
     char weather_url[512];
@@ -119,8 +127,16 @@ char* weather_execute(const char* args_json) {
     }
 
     cJSON* current = cJSON_GetObjectItemCaseSensitive(weather_json, "current_weather");
-    double temp = cJSON_GetObjectItemCaseSensitive(current, "temperature")->valuedouble;
-    double windspeed = cJSON_GetObjectItemCaseSensitive(current, "windspeed")->valuedouble;
+    cJSON* temp_node = current ? cJSON_GetObjectItemCaseSensitive(current, "temperature") : NULL;
+    cJSON* wind_node = current ? cJSON_GetObjectItemCaseSensitive(current, "windspeed") : NULL;
+    if (!cJSON_IsNumber(temp_node) || !cJSON_IsNumber(wind_node)) {
+        cJSON_Delete(weather_json);
+        cJSON_Delete(geo_json);
+        cJSON_Delete(json);
+        return strdup("Error: Incomplete weather response");
+    }
+    double temp = temp_node->valuedouble;
+    double windspeed = wind_node->valuedouble;
 
     char* result_msg = malloc(512);
     snprintf(result_msg, 512, "Current weather in %s: %.1f°C, Wind Speed: %.1f km/h", name, temp, windspeed);
